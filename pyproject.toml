@@ -1,0 +1,29 @@
+[project]
+name = "mcp-websearch"
+version = "0.1.0"
+description = "MCP web_search server, ported from Unsloth Studio's server-side tool loop"
+requires-python = ">=3.9"
+dependencies = [
+    # Exact, not a range: an open bound means every install silently adopts the newest SDK.
+    # The reviewed set lives in requirements.lock with hashes.
+    "mcp==2.2.0",
+    # Same pins as upstream studio/backend/requirements/studio.txt
+    "ddgs==9.14.4 ; python_version >= '3.10'",
+    "ddgs==9.8.0 ; python_version < '3.10'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+websearch-mcp = "server:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["unsloth_search"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

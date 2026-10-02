@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "websearch": {
+      "command": "$HOME/.qwen/websearch-mcp/.venv/bin/python",
+      "args": [
+        "$HOME/.qwen/websearch-mcp/server.py"
+      ],
+      "env": {
+        "UNSLOTH_PAGE_MAX_CHARS": "16000",
+        "UNSLOTH_SEARCH_MAX_RESULTS": "5"
+      },
+      "trust": false,
+      "description": "Keyless web search, ported from Unsloth Studio"
+    }
+  }
+}
