@@ -109,9 +109,9 @@ def web_search(
             if results:
                 break
         if not results and last_error is not None:
-            # Tier 3 (fork, not upstream): a throttled free sweep is what SerpApi exists for.
-            # An honest empty sweep never reaches here, so a paid call is never spent on a
-            # query that legitimately has no answer. Spends only the ORIGINAL budget's remainder.
+            # Tier 3 (fork, not upstream): SerpApi exists for free tiers that produced nothing.
+            # ddgs signals an empty sweep by raising, so throttled and genuinely-empty both land
+            # here indistinguishably and both may pay. Spends only the ORIGINAL budget's remainder.
             budget = None if deadline is None else deadline - time.monotonic()
             if budget is None or budget > 0:
                 fallback = serpapi_search(

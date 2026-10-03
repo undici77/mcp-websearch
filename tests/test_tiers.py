@@ -6,7 +6,9 @@ Drives the real DDGS engine selector; only each engine's own ``search`` is repla
 strings really are resolved by ddgs and a fan-out cannot hide.
 """
 
+import json
 import time
+import urllib.request
 
 import pytest
 
@@ -14,7 +16,7 @@ from ddgs.engines import ENGINES
 from ddgs.exceptions import DDGSException
 from ddgs.results import TextResult
 
-from unsloth_search import web_search
+from unsloth_search import serpapi, web_search
 from unsloth_search.upstream_verbatim import EMPTY_SEARCH_RESULTS, _resolve_engine_tiers
 
 TIER1 = ("wikipedia", "brave", "duckduckgo", "mojeek", "startpage")
@@ -61,6 +63,13 @@ def engine_calls(monkeypatch):
     return _Recorder(monkeypatch)
 
 
+@pytest.fixture
+def no_paid_key(monkeypatch):
+    """Tier 3 spends money when a key exists, so a test claiming 'no results' must clear both key sources."""
+    monkeypatch.delenv("SERPAPI_API_KEY", raising = False)
+    monkeypatch.setattr(serpapi, "KEY_FILE", "/nonexistent/keys.json")
+
+
 def _require_two_tiers():
     resolved = _resolve_engine_tiers(ENGINES["text"])
     if len(resolved) < 2:
@@ -95,9 +104,44 @@ def test_a_tier_one_refusal_falls_through_to_tier_two(engine_calls):
     assert "URL: https://" in result
 
 
-def test_every_tier_empty_reports_no_results_and_never_widens(engine_calls):
+def test_every_tier_empty_reports_no_results_and_never_widens(engine_calls, no_paid_key):
     engine_calls.install(lambda n: "empty")
     assert web_search("unsloth") == EMPTY_SEARCH_RESULTS[0]
+    assert "yandex" not in engine_calls.names
+
+
+def test_tier_three_pays_and_answers_only_when_a_key_exists(monkeypatch, engine_calls, tmp_path):
+    """ddgs cannot tell throttled from empty, so an empty free sweep reaches tier 3; the host stays serpapi.com."""
+    key_file = tmp_path / "keys.json"
+    key_file.write_text(json.dumps({"serpapi": "test-key"}))
+    monkeypatch.delenv("SERPAPI_API_KEY", raising = False)
+    monkeypatch.setattr(serpapi, "KEY_FILE", str(key_file))
+
+    hosts = []
+    payload = {"organic_results": [{"title": "Paid hit", "link": "https://example.org/paid", "snippet": "From the paid tier."}]}
+
+    class _Resp:
+        def read(self):
+            return json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(request, *a, **k):
+        # full_url minus the query: the api_key must never reach an assertion message.
+        hosts.append(request.full_url.split("?")[0])
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    engine_calls.install(lambda n: "empty")
+
+    result = web_search("unsloth")
+
+    assert hosts == ["https://serpapi.com/search"], f"unexpected paid egress: {hosts}"
+    assert "Paid hit" in result and "https://example.org/paid" in result
     assert "yandex" not in engine_calls.names
 
 
