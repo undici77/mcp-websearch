@@ -7,8 +7,47 @@ scripts/align.py            # fetch origin/main, report, exit non-zero if work i
 scripts/align.py --diff     # print the upstream body for anything flagged
 ```
 
-Say `align current MCP with upstream/main` → run the above. It reads **named symbols only**, never the
-22k-line `tools.py` whole. Typical run: ~1s.
+It reads **named symbols only**, never the 22k-line `tools.py` whole. Typical run: ~1s.
+
+## When align is required
+
+Not optional, not "when convenient". Run it at each of these:
+
+| trigger | do |
+|---|---|
+| about to edit anything in `unsloth_search/` | `scripts/align.py` **first** — a stale anchor makes the edit a divergence you will have to unwind |
+| touched a `vendored` file | `align.py --diff`. A vendored file is byte-exact or it is wrong; there is no third state |
+| the `ddgs` pin changed | `align.py` **and** `approved_engines()` — the live engine registry is an output of the pin |
+| `anchor` ≠ `origin/main` in any output | full ritual. A stale anchor **is** owed work, not a status line |
+| any `REVIEW` row | read that churn with `--diff`, re-justify or port, then `--bump` |
+| shipping, tagging, handing off, or opening a PR on this port | full ritual, steps 1–9, ending in `ALIGNED.` |
+| you last aligned more than a week ago | `align.py`. `main` moved; assume it moved in the watched surface |
+| someone says `align current MCP with upstream/main` | full ritual, this turn |
+
+The trigger is the **anchor**, not memory. `align.py` costs ~1s; not running it costs a port that is
+quietly behind upstream on the one surface carrying the SSRF gates and the tier allowlist.
+
+## `align` means DO it, not report it
+
+`align.py` is a **gate**, not a deliverable. Read the **printed line**, not the exit code — exit `0`
+covers two different states, because one `print` emits both (`align.py:291`), and a lone `REVIEW`
+exits `0` since `owed` counts only DRIFT + BROKEN (`align.py:279`).
+
+| printed | exit | state | you must |
+|---|---|---|---|
+| `ALIGNED.` | `0` | anchor == `origin/main`, nothing owed | report the anchor + counts. **Stop.** |
+| `Aligned, but anchored to an older commit.` | `0` | content matches, **anchor is stale** | run steps 2–7, `--bump`, re-run until the line says `ALIGNED.` |
+| `REVIEW adapted …` | `0` | upstream churned an adapted symbol | `--diff`, read it, re-justify in the doc **or** port it, then `--bump` |
+| `DRIFTED` / `BROKEN` / `NEW?` | `1` | work owed | **finish the ritual below, in this same turn.** Then show `ALIGNED.` |
+
+A green exit is not an alignment, and "here is what you should do next" is not an alignment. Port it,
+`cp` it, bump it, prove it green, re-run `align.py` until it prints `ALIGNED.` — then report. Asking
+permission to apply a `cp` that the doc already prescribes is the failure mode this section exists to
+kill.
+
+Two exceptions, because they are genuinely yours to make and not mine: a **new** upstream capability
+(POST, binary mode, per-hop headers) that expands scope, and anything that would weaken an invariant
+below. Everything else is mechanical — do it.
 
 ---
 
@@ -49,15 +88,36 @@ vendored hashes).
 
 ```bash
 scripts/align.py --diff          # 1. what moved?
-scripts/build_port.py            # 2. regenerate the verbatim surface
-# 3. apply the vendored cp and read the adapted REVIEWs by hand
-.venv/bin/python -m pytest -q tests          # 4. green
-.venv/bin/python scripts/check_egress_mcp.py # 5. live egress gate — one real query, hosts vs tiers
-scripts/align.py --bump          # 6. re-anchor  (refused while anything is owed)
+git -C .align/upstream checkout -q origin/main   # 2. move the checkout — build_port reads the TREE, not the ref
+scripts/build_port.py            # 3. regenerate the verbatim surface
+# 4. cp every flagged vendored file off the checkout; read the adapted REVIEWs by hand
+.venv/bin/python -m pytest -q tests          # 5. green
+.venv/bin/python scripts/check_egress_mcp.py # 6. live egress gate — one real query, hosts vs tiers
+scripts/align.py --bump          # 7. re-anchor  (refused while anything is owed)
+# 8. refresh .align/upstream-stub off the checkout, then re-run pytest
+scripts/align.py                 # 9. must print ALIGNED. — that, not step 7, is the deliverable
 ```
 
 `--bump` refuses while anything is DRIFTED or BROKEN, so the anchor can never silently move past
 unapplied work.
+
+**Step 2 is not optional.** `git fetch` moves `origin/main` and checks out nothing, and both
+`build_port.py`'s `locate()` and `tests/test_fidelity.py` hash a **working-tree path**. Skip the
+checkout and step 3 regenerates anchor-content that step 7 then stamps with a newer anchor — a
+false green that no later run can catch.
+
+**Step 4: `cp` is the fix for any vendored flag.** A vendored file is byte-exact or it is wrong, so
+pull the ref copy regardless of whether the note blames local or upstream — the note's attribution is
+inverted (`align.py:226` treats *equality* with the recorded hash as "upstream changed"). Trust the
+hashes, not the sentence.
+
+**Step 8 or the gate fights you.** `.align/upstream-stub/` is an untracked offline stand-in for the
+anchored ref. Leave it at the old anchor and `test_vendored_files_are_byte_exact` fails *the correct
+fix*; delete it (fresh clone) and the test silently skips. Refresh it whenever the anchor moves.
+
+**`main` moves mid-run.** Observed 2026-10-05: the ref advanced twice inside one session
+(`7b2f7d5` → `f57a7de`), and `--bump` anchored to the newer ref than the content just copied. Step 9
+is what catches that; if it flags anything, loop back to step 2.
 
 ## The watched surface, if you insist on grepping
 
@@ -103,13 +163,40 @@ studio/backend/requirements/studio.txt               the ddgs pin
 
 Studio-UI-coupled, no MCP equivalent: image search and its opaque-id thumbnail registry
 (`_image_search`, `_web_search_images_suffix`, `web_search_tool_with_images`, `_clean_image_queries`,
-`search_images.py`), PDF text extraction (`_extract_pdf_text` — PDFs are refused by magic instead),
-`<meta refresh>` following (`_meta_refresh_target` — fails closed), WHATWG `<meta charset>` prescan,
-`_dense_char_limit`, and context-window page sizing (`_page_char_budget` → `UNSLOTH_PAGE_MAX_CHARS`;
-an MCP server has no resident model to probe).
+`search_images.py`), PDF text extraction (`_extract_pdf_text`, `_MAX_PDF_FETCH_BYTES`,
+`_has_pdf_magic` — PDFs are refused by magic instead of half-read), `<meta refresh>` following
+(`_meta_refresh_target` — fails closed), WHATWG `<meta charset>` prescan (`_sniff_meta_charset`,
+`_WHATWG_CHARSET_LABELS`, `_whatwg_codec`), `_dense_char_limit`, and context-window page sizing
+(`_page_char_budget` → `UNSLOTH_PAGE_MAX_CHARS`; an MCP server has no resident model to probe).
+
+**Recorded at the `c17ca64` anchor, closing the `_fetch_url_raw` REVIEW.** Upstream grew four call
+capabilities in that signature. Each expands what the tool can *do*, so each is the maintainer's call,
+not a mechanical port:
+
+| upstream | what it adds | why it stays out here |
+|---|---|---|
+| `raw_bytes_max` | binary mode — body returned as `bytes` | an MCP client gets text in a JSON string; raw bytes need a content part the schema has no field for |
+| `post_data` | urlencoded POST, kept on 307/308 | `web_search` is read-only; POST contradicts `readOnlyHint` and the per-call `url` confirmation |
+| `host_headers` | per-hop headers, shed when a redirect crosses sites | nothing to shed — the schema exposes `query`/`url` only, no caller-supplied secrets |
+| `meta_out` | final `url`/`charset`/`filename`, plus `bot_check` on HTTP errors | no resident UI to render them; the error string is the whole channel |
+
+Also unported from the same churn, both deliberate: `_is_bot_check` (only feeds `meta_out`) and
+`_has_single_byte_text_evidence` (upstream's cp1252 rescue for mislabeled text — here a body that
+`_looks_binary` cannot clear returns the binary placeholder, failing closed). `_DISABLE_DNS_PINNING_ENV`
+is upstream's name for the literal kept inline at `fetch.py:159`; same variable, same default, so the
+diff stays honest without a rename.
 
 If upstream grows a new web/search symbol, `align.py` prints it under `NEW?`. Port it, or add it to
 `OUT_OF_SCOPE`/`ANNOTATED` with a reason. Silence is a decision, not an accident.
+
+`NEW?` is **keyword-matched** (`web_search`, `engine_tier`, `fetch_page`, `fetch_url`, `search_engine`
+at `align.py:263`), so `0 new` does not mean nothing new. At `c17ca64` it prints **zero** while 927
+upstream symbols sit unmapped — including fetch-adjacent ones that bear on this port:
+`_has_pdf_magic`, `_MAX_PDF_FETCH_BYTES`, `_sniff_meta_charset`, `_has_single_byte_text_evidence`,
+`_is_bot_check`, `_DISABLE_DNS_PINNING_ENV`, and upstream's 256K tool-result spill
+(`cap_tool_text` / `MAX_TOOL_TEXT_CHARS` / `_TOOL_TEXT_READERS` / `_tool_text_notice_head` /
+`_tool_text_search_hint`). Diff upstream's symbol list against the anchor when the churn looks
+suspicious — don't trust the zero.
 
 ## Adding a symbol
 
