@@ -57,25 +57,24 @@ The verbatim surface is **generated**, not copied by hand.
 
 ```
 studio/backend/core/inference/tools.py
-        │  scripts/build_port.py  (AST extraction, 58 symbols, upstream line order)
+        │  scripts/build_port.py  (AST extraction, 71 symbols, upstream line order)
         ▼
 unsloth_search/upstream_verbatim.py      ← GENERATED, DO NOT EDIT
         │  imports, unchanged
         ▼
-unsloth_search/fetch.py · search.py      ← the hand-written 5 adapted functions
+unsloth_search/fetch.py · search.py      ← the hand-written adapted functions
 ```
 
-A transcription error is no longer possible in 58 of the 63 ported symbols: they are emitted by a
-script from upstream's AST. Rebuilding is deterministic — the same upstream commit always produces the
-same sha256.
+A transcription error is no longer possible in 71 of the 77 ported symbols: they are emitted by a
+script from upstream's AST, and the same upstream commit always produces the same sha256.
 
 ## The four surfaces
 
 | surface | count | test | when it shouts |
 |---|---|---|---|
-| `generated` | 58 | re-extract from upstream, compare each symbol's AST | upstream changed → `scripts/build_port.py` fixes it |
+| `generated` | 71 | re-extract from upstream, compare each symbol's AST | upstream changed → `scripts/build_port.py` fixes it |
 | `vendored` | 2 | sha256 both ways (`web_access_policy.py`, `_html_to_md.py`) | upstream changed → `cp` |
-| `adapted` | 5 | upstream fingerprint vs the one recorded at sync | upstream touched it → read and re-justify |
+| `adapted` | 6 | upstream fingerprint vs the one recorded at sync | upstream touched it → read and re-justify |
 | `out-of-scope` / `annotated` | 9 | presence + churn | upstream grew the feature, or deleted it |
 
 `adapted` never claims equality — local code differs on purpose. It only flags upstream churn, which is
@@ -115,9 +114,19 @@ hashes, not the sentence.
 anchored ref. Leave it at the old anchor and `test_vendored_files_are_byte_exact` fails *the correct
 fix*; delete it (fresh clone) and the test silently skips. Refresh it whenever the anchor moves.
 
-**`main` moves mid-run.** Observed 2026-10-05: the ref advanced twice inside one session
-(`7b2f7d5` → `f57a7de`), and `--bump` anchored to the newer ref than the content just copied. Step 9
-is what catches that; if it flags anything, loop back to step 2.
+**`main` moves mid-run — `ALIGNED.` alone is not the proof.** `align.py` compares against
+`git show origin/main:…`, so every fetch can advance the ref out from under you: step 7 stamps an
+anchor newer than the content step 3 copied, and the next `build_port.py` (which reads the TREE)
+silently regenerates the stale content. Before calling it done, prove all three agree:
+
+```bash
+git -C .align/upstream rev-parse HEAD                       # checkout
+git -C .align/upstream rev-parse origin/main               # ref
+.venv/bin/python -c "import json;print(json.load(open('.align/manifest.json'))['upstream_commit'])"
+```
+
+Same sha three times, or loop back to step 2: move the checkout, rebuild, `cp` the vendored files,
+refresh the stub, re-test, re-align.
 
 ## The watched surface, if you insist on grepping
 
@@ -151,58 +160,132 @@ studio/backend/requirements/studio.txt               the ddgs pin
 
 ## Upstream behaviour that is NOT a bug to fix here
 
-- **A throttled tier-2 engine masks an honest empty sweep.** `if not results and last_error: raise
-  last_error` turns "nothing matched" into `Search failed: RequestError(...)`. Observed live here on
-  2026-10-02 (`grokipedia … tls handshake eof`). Upstream behaves identically. Copy it — "fixing" it
-  makes every future diff dirty forever.
+- **A tier's exception outranks an empty sweep.** `if not results and last_error: raise last_error`
+  turns "nothing matched" into `Search failed: RequestError(...)`. Keep it — an engine that threw is a
+  different fact from one that found nothing, and `_search_failure_message` exists to say which.
+- **A policy-blocked sweep is not an exception.** `_usable_search_results` filters each tier's
+  candidates through `check_url_access` before the loop decides, and the re-raise is gated on
+  `not rejected_results`. Hits that existed but the website policy refused report
+  `EMPTY_SEARCH_RESULTS[1]`, never `Search failed: <exception>`. Never widen it back to
+  `if not results and last_error:`.
 - `EMPTY_SEARCH_RESULTS` is two distinct strings for two distinct exits. Both must survive.
 - Tier 1 may *raise* rather than return `[]` on an empty sweep. That is how ddgs signals empty, and the
   tier fall-through depends on it.
 
+**Tier 3 spends money, so its gate is narrower than "empty".** SerpApi fires only on a sweep that
+actually ran and came up empty. Keep it shut when the sweep was policy-blocked (`rejected_results`) and
+when no approved engine resolved (`client is None` — a broken install, not an empty search: SerpApi
+would re-find the same URLs and the same policy would drop them again). Prove either gate with the key
+**armed** and the recorded host list asserted empty; a keyless test proves nothing about the gate.
+
 ## Deliberately out of scope
 
-Studio-UI-coupled, no MCP equivalent: image search and its opaque-id thumbnail registry
-(`_image_search`, `_web_search_images_suffix`, `web_search_tool_with_images`, `_clean_image_queries`,
-`search_images.py`), PDF text extraction (`_extract_pdf_text`, `_MAX_PDF_FETCH_BYTES`,
-`_has_pdf_magic` — PDFs are refused by magic instead of half-read), `<meta refresh>` following
-(`_meta_refresh_target` — fails closed), WHATWG `<meta charset>` prescan (`_sniff_meta_charset`,
-`_WHATWG_CHARSET_LABELS`, `_whatwg_codec`), `_dense_char_limit`, and context-window page sizing
-(`_page_char_budget` → `UNSLOTH_PAGE_MAX_CHARS`; an MCP server has no resident model to probe).
+One test decides every case: does porting this give the MCP server a **new capability**, or does it
+only read the same result better? New capability → the maintainer's call, refuse it here and record
+why. Reads better → port it.
 
-**Recorded at the `c17ca64` anchor, closing the `_fetch_url_raw` REVIEW.** Upstream grew four call
-capabilities in that signature. Each expands what the tool can *do*, so each is the maintainer's call,
-not a mechanical port:
+**Never port:**
 
-| upstream | what it adds | why it stays out here |
-|---|---|---|
-| `raw_bytes_max` | binary mode — body returned as `bytes` | an MCP client gets text in a JSON string; raw bytes need a content part the schema has no field for |
-| `post_data` | urlencoded POST, kept on 307/308 | `web_search` is read-only; POST contradicts `readOnlyHint` and the per-call `url` confirmation |
-| `host_headers` | per-hop headers, shed when a redirect crosses sites | nothing to shed — the schema exposes `query`/`url` only, no caller-supplied secrets |
-| `meta_out` | final `url`/`charset`/`filename`, plus `bot_check` on HTTP errors | no resident UI to render them; the error string is the whole channel |
+| upstream | why it stays out |
+|---|---|
+| `_image_search`, `_web_search_images_suffix`, `web_search_tool_with_images`, `_clean_image_queries`, `search_images.py` | opaque-id thumbnail registry; no proxy to register ids against |
+| `_extract_pdf_text`, `_MAX_PDF_FETCH_BYTES`, `_has_pdf_magic` | PDFs are refused by magic, not half-read |
+| `_meta_refresh_target` | a page's own refresh hop is not followed; fails closed |
+| `_sniff_meta_charset`, `_WHATWG_CHARSET_LABELS`, `_whatwg_codec` | declared/BOM/utf-8 only |
+| `_dense_char_limit` | density re-scan bound to Studio's token accounting |
+| `_page_char_budget`, `_result_char_budget`, `_request_context_tokens`, `_UNMEASURED_ROOM_MARGIN` | probes the loaded model's window via a Studio ContextVar; `UNSLOTH_PAGE_MAX_CHARS` is the override here |
+| `cap_tool_text`, `MAX_TOOL_TEXT_CHARS`, `_TOOL_TEXT_READERS`, `_tool_text_notice_head`, `_tool_text_search_hint` | 256K spill to disk; the MCP client owns its truncation |
+| `raw_bytes_max` | binary mode; a JSON text channel has no content part for `bytes` |
+| `post_data` | read-only tool; POST contradicts `readOnlyHint` and the per-call `url` confirmation |
+| `host_headers` | nothing to shed — the schema never carries caller secrets |
+| `meta_out`, `_is_bot_check` | no resident UI; the error string is the whole channel |
+| `_has_single_byte_text_evidence` | cp1252 rescue; `_looks_binary` failing closed is the contract |
+| `_wikipedia_search` | second route to `en.wikipedia.org/w/api.php` outside ddgs, via `raw_bytes_max` |
+| `DEEP_RESEARCH_TOOL`, `RENDER_HTML_TOOL`, `SEARCH_CONVERSATION_TOOL`, `SEARCH_KNOWLEDGE_BASE_TOOL` | separate tools; this MCP mirrors `web_search` alone, each needs its own schema + egress review |
 
-Also unported from the same churn, both deliberate: `_is_bot_check` (only feeds `meta_out`) and
-`_has_single_byte_text_evidence` (upstream's cp1252 rescue for mislabeled text — here a body that
-`_looks_binary` cannot clear returns the binary placeholder, failing closed). `_DISABLE_DNS_PINNING_ENV`
-is upstream's name for the literal kept inline at `fetch.py:159`; same variable, same default, so the
-diff stays honest without a rename.
+`_DISABLE_DNS_PINNING_ENV` is upstream's name for the literal kept inline at `fetch.py:159`; same
+variable, same default, so the diff stays honest without a rename.
+
+**Port these — do not stop at a REVIEW:**
+
+| upstream | why |
+|---|---|
+| `_HTMLBodyLocator`, `_MAX_HTML_FETCH_BYTES`, `body_window`/`charset` args | a flat `_MAX_FETCH_BYTES` cap returns `<head>`, not content. Wider read, same text out, no new egress or schema field |
+| `_install_yahoo_layout_parser`, `_install_ddgs_http1_retry`, `_wrap_ddgs_client`, `_ddgs_http1_replay`, `_is_connection_reset`, `_DDGS_RESET_MARKERS`, `_DDGS_HTTP1_RETRY_LOCK`, `_class_token`, `_YAHOO_SECTION_*` | ddgs-side gaps, not tier gaps: Yahoo is tier 2 and `section.algo` parses empty; the replay answers resets and `tls handshake eof`. Idempotent, renames no engine |
+| `_usable_search_results` | the tier gate above |
+| upstream's `or href` title fallback | absorb it; keep `clip.py` — with no spill, one uncapped hit fills the channel |
 
 If upstream grows a new web/search symbol, `align.py` prints it under `NEW?`. Port it, or add it to
 `OUT_OF_SCOPE`/`ANNOTATED` with a reason. Silence is a decision, not an accident.
 
-`NEW?` is **keyword-matched** (`web_search`, `engine_tier`, `fetch_page`, `fetch_url`, `search_engine`
-at `align.py:263`), so `0 new` does not mean nothing new. At `c17ca64` it prints **zero** while 927
-upstream symbols sit unmapped — including fetch-adjacent ones that bear on this port:
-`_has_pdf_magic`, `_MAX_PDF_FETCH_BYTES`, `_sniff_meta_charset`, `_has_single_byte_text_evidence`,
-`_is_bot_check`, `_DISABLE_DNS_PINNING_ENV`, and upstream's 256K tool-result spill
-(`cap_tool_text` / `MAX_TOOL_TEXT_CHARS` / `_TOOL_TEXT_READERS` / `_tool_text_notice_head` /
-`_tool_text_search_hint`). Diff upstream's symbol list against the anchor when the churn looks
-suspicious — don't trust the zero.
+**Never trust the `0 new`.** `NEW?` is keyword-matched (`web_search`, `engine_tier`, `fetch_page`,
+`fetch_url`, `search_engine` at `align.py:263`), so the overwhelming majority of upstream's symbols
+are invisible to it. When the churn looks suspicious, list what is unmapped:
+
+```bash
+.venv/bin/python - <<'PY'
+import sys; sys.path.insert(0, "scripts")
+import build_port, align
+p = align.upstream_file(align.find_upstream(None), build_port.UPSTREAM_REL, "origin/main")
+known = set(build_port.SYMBOLS) | set(align.ADAPTED) | set(align.OUT_OF_SCOPE) | set(align.ANNOTATED)
+un = sorted(set(align.symbols(p)) - known)
+print(len(un), "unmapped of", len(align.symbols(p)))
+print([n for n in un if any(k in n.lower() for k in ("fetch", "search", "html", "http", "text"))])
+PY
+```
 
 ## Adding a symbol
 
 1. Add the name to `SYMBOLS` in `scripts/build_port.py` (verbatim) **or** to `ADAPTED` in
    `scripts/align.py` (needs local judgement).
 2. `scripts/build_port.py` → `pytest -q tests` → `scripts/align.py --bump`.
+
+**A new symbol drags its dependencies in.** `build_port.py` extracts the named symbol only, so a symbol
+that calls an unlisted helper — usually one reached through a new parameter — emits a file that imports
+clean and raises `NameError` at the call. `align.py` compares ASTs symbol by symbol and cannot see it.
+After every `build_port.py`, check the closure with `symtable`, never by importing:
+
+```bash
+.venv/bin/python - <<'PY'
+import symtable, builtins
+t = symtable.symtable(open("unsloth_search/upstream_verbatim.py").read(), "m", "exec")
+d = {s.get_name() for s in t.get_symbols() if s.is_assigned() or s.is_imported()}
+need = set()
+def w(x):
+    for s in x.get_symbols():
+        if s.is_referenced() and s.is_global() and s.get_name() not in d and not hasattr(builtins, s.get_name()):
+            need.add(s.get_name())
+    for c in x.get_children(): w(c)
+w(t); print(sorted(need) or "clean")
+PY
+```
+
+`HEADER` binds `logger = logging.getLogger(__name__)` — the only non-upstream binding in the generated
+file. Keep it: upstream's `get_logger(__name__)` lives in studio's logging module, outside the ported
+surface, and `_install_ddgs_http1_retry` calls `logger.debug`.
+
+## Install: a stale `.align/upstream` in DEST outranks the anchor
+
+`build_port.py`'s `locate()` ranks `.align/upstream` **above** `.align/upstream-stub`, and rsync's
+`--exclude` also shields a matching DEST path from `--delete`. A clone an earlier install left in DEST
+therefore survives every later install and wins, regenerating the verbatim surface from a commit that
+predates the anchor. Symptom: `build_port.py` warns `upstream has no: …`, the symbol count drops, and
+the installed server dies at `import` on a missing symbol.
+
+`install.sh` must:
+
+1. `rm -rf "$DEST/.align/upstream" "$DEST/.align/refcache"` after the sync, in **both** branches —
+   neither is the anchor; the stub is, and the stub is what should be left standing.
+2. Compare the count `build_port` reports against `manifest.generated_symbols`. Fewer means the source
+   it found predates the anchor.
+3. Unregister and `exit 1` on any of these. A dead tool in `/mcp` is worse than no tool.
+
+Prove the installed tree is the anchored tree, from `$DEST`:
+
+```bash
+.venv/bin/python scripts/align.py --offline --upstream .align/upstream-stub   # 88 tracked · 88 synced
+.venv/bin/python -c "import asyncio,server;print([t.name for t in asyncio.run(server.app.list_tools())])"
+```
 
 ## When this becomes its own repo
 

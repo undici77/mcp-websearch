@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install websearch MCP into $HOME and register it with qwen. Never fatal to qwen itself.
+# Install websearch MCP into $HOME and register it with qwen. Never fatal to qwen itself: a failed
+# port unregisters rather than registering a dead server, and exits 1 so the caller can see it.
 # bash 3.2 compatible (macOS /usr/bin/env bash).
 set -uo pipefail
 
@@ -36,8 +37,13 @@ if command -v rsync >/dev/null 2>&1; then
     "$SRC/" "$DEST/" || { warn "rsync failed"; exit 0; }
 else
   cp -rp "$SRC/." "$DEST/" || { warn "copy failed"; exit 0; }
-  rm -rf "$DEST/.venv" "$DEST/.align/upstream" "$DEST/.align/refcache" "$DEST/.pytest_cache" 2>/dev/null || true
+  # cp honours no excludes, so the source venv came along; a venv is not relocatable.
+  rm -rf "$DEST/.venv" 2>/dev/null || true
 fi
+# An rsync --exclude also shields the matching DEST path from --delete, so a .align/upstream left by
+# an earlier install survives every later one — and locate() prefers it over the anchored stub.
+# Neither cache is the anchor; drop both so locate() resolves to the stub that just synced.
+rm -rf "$DEST/.align/upstream" "$DEST/.align/refcache" "$DEST/.pytest_cache" 2>/dev/null || true
 
 step "venv + hash-pinned deps"
 VP="$DEST/.venv/bin/python"
@@ -56,14 +62,25 @@ else
 fi
 
 step "generate verbatim surface + verify"
+BROKEN=0
+GEN="$DEST/scripts/build_port.py"
 if [ -f "$DEST/.align/upstream-stub/studio/backend/core/inference/tools.py" ] \
    || [ -n "${UNSLOTH_UPSTREAM:-}" ]; then
-  "$DEST/.venv/bin/python" "$DEST/scripts/build_port.py" --check \
-    || "$DEST/.venv/bin/python" "$DEST/scripts/build_port.py"
+  # Echo what build_port resolved to: the located source is the thing that goes stale.
+  OUT="$("$VP" "$GEN" --check 2>&1)" || OUT="$("$VP" "$GEN" 2>&1)"
+  printf '%s\n' "$OUT" | sed 's/^/  /'
+  # The manifest records how many symbols the anchor yields. Fewer means build_port read a source
+  # older than the anchor — the exact stale-clone failure above — so the port is incomplete, not fresh.
+  WANT="$("$VP" -c 'import json,sys;print(json.load(open(sys.argv[1])).get("generated_symbols",0))' "$DEST/.align/manifest.json" 2>/dev/null)"
+  HAVE="$(printf '%s\n' "$OUT" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) symbols.*/\1/p' | head -1)"
+  if [ -z "$WANT" ] || [ "$HAVE" != "$WANT" ]; then
+    warn "generated ${HAVE:-?} symbols, the anchor yields ${WANT:-?} — the upstream source build_port found is stale, not the anchor"
+    BROKEN=1
+  fi
 else
   warn "no upstream source; fidelity check skipped (align.py will shallow-clone on first run)"
 fi
-"$DEST/.venv/bin/python" -m pytest -q "$DEST/tests" || warn "tests failed — search may misbehave"
+"$DEST/.venv/bin/python" -m pytest -q "$DEST/tests" || { warn "tests failed"; BROKEN=1; }
 
 step "key file"
 if [ ! -f "$KEY_FILE" ]; then
@@ -74,7 +91,12 @@ chmod 600 "$KEY_FILE" 2>/dev/null || true
 [ -s "$KEY_FILE" ] || warn "$KEY_FILE has no serpapi key — tier 3 stays disabled (free tiers only)"
 
 step "register with qwen"
-if command -v qwen >/dev/null 2>&1; then
+if [ "$BROKEN" -ne 0 ]; then
+  # A registered server that fails at import shows up in /mcp as a dead tool the model may still
+  # reach for. Unregister it and leave qwen on its built-in path until the port is fixed.
+  qwen mcp remove websearch >/dev/null 2>&1 || true
+  warn "NOT registered — the build above is incomplete. Fix it and re-run install.sh."
+elif command -v qwen >/dev/null 2>&1; then
   qwen mcp remove websearch >/dev/null 2>&1 || true
   qwen mcp add websearch "$DEST/.venv/bin/python" "$DEST/server.py" \
     -t stdio -s user --description "Keyless web search, ported from Unsloth Studio" \
@@ -82,6 +104,12 @@ if command -v qwen >/dev/null 2>&1; then
     || warn "qwen mcp add failed — add it by hand from qwen-mcp-snippet.json"
 else
   warn "qwen not on PATH; merge qwen-mcp-snippet.json into ~/.qwen/settings.json by hand"
+fi
+
+if [ "$BROKEN" -ne 0 ]; then
+  printf '\n  NOT installed. The port did not verify — qwen is untouched and still on its built-in path.\n'
+  printf '  Re-run install.sh after fixing the reported symbol gap.\n'
+  exit 1
 fi
 
 cat <<'DONE'

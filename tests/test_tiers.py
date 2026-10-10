@@ -7,7 +7,6 @@ strings really are resolved by ddgs and a fan-out cannot hide.
 """
 
 import json
-import time
 import urllib.request
 
 import pytest
@@ -184,8 +183,16 @@ def test_disabled_engines_are_dropped_from_a_tier(monkeypatch, engine_calls):
 
 
 def test_the_caller_timeout_is_one_budget_for_both_tiers(monkeypatch, engine_calls):
-    """Tier 2 inherits what is LEFT of the timeout: a fresh copy doubles what the caller asked for."""
+    """Tier 2 inherits what is LEFT of the timeout: a fresh copy doubles what the caller asked for.
+
+    A fake clock pins the exact budgets — initial and tier 1 get 3s, tier 2 the 2s left — where a
+    monotonic clock can only assert they shrink. Summing them would sum overlapping windows.
+    """
+    from types import SimpleNamespace
+
     from ddgs.ddgs import DDGS
+
+    import unsloth_search.search as search_mod
 
     budgets = []
     real_init = DDGS.__init__
@@ -196,18 +203,27 @@ def test_the_caller_timeout_is_one_budget_for_both_tiers(monkeypatch, engine_cal
 
     monkeypatch.setattr(DDGS, "__init__", recording_init)
     engine_calls.install(lambda n: "empty" if n in TIER1 else "results")
-    for name in TIER1:
-        cls = ENGINES["text"].get(name)
-        if cls is not None:
-            inner = cls.search
-            monkeypatch.setattr(cls, "search", lambda self, q, _i = inner, **k: (time.sleep(0.3), _i(self, q, **k))[1])
 
-    web_search("unsloth", timeout = 3)
+    clock = SimpleNamespace(now = 100.0)
+    monkeypatch.setattr(search_mod, "time", SimpleNamespace(monotonic = lambda: clock.now))
+    real_text = DDGS.text
+    searched = []
 
-    tier_budgets = [b for b in budgets if isinstance(b, (int, float))]
-    assert len(tier_budgets) >= 3, f"expected a client per tier, saw {budgets}"
-    assert tier_budgets == sorted(tier_budgets, reverse = True), f"budget did not shrink: {tier_budgets}"
-    assert max(tier_budgets) <= tier_budgets[0], "a tier was handed more than the original budget"
+    def timed_text(self, *a, **k):
+        searched.append(k.get("backend"))
+        try:
+            return real_text(self, *a, **k)
+        finally:
+            # advance only this module's clock, so ddgs's own engine selection stays deterministic
+            clock.now += 1
+
+    monkeypatch.setattr(DDGS, "text", timed_text)
+
+    result = web_search("unsloth", timeout = 3)
+
+    assert "URL:" in result
+    assert searched == _resolve_engine_tiers(ENGINES["text"]), "a tier was skipped or invented"
+    assert budgets == [3, 3, 2], f"budgets were {budgets}, not one shrinking budget"
 
 
 def test_the_resolver_never_names_an_engine_outside_the_tiers():

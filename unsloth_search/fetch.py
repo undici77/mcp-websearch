@@ -17,7 +17,7 @@ import re
 import time
 import urllib.request
 
-from ._html_to_md import html_to_markdown
+from ._html_to_md import SiteLinks, html_to_markdown
 from .upstream_verbatim import (  # noqa: F401  re-exported for callers and tests
     _BINARY_APPLICATION_SUBTYPES,
     _BINARY_MAGIC,
@@ -30,6 +30,7 @@ from .upstream_verbatim import (  # noqa: F401  re-exported for callers and test
     _IRI_PATH_SAFE,
     _IRI_QUERY_SAFE,
     _MAX_FETCH_BYTES,
+    _MAX_HTML_FETCH_BYTES,
     _MAX_PAGE_CHARS,
     _MIN_PAGE_CHARS,
     _PAGE_CONTEXT_SHARE,
@@ -48,6 +49,7 @@ from .upstream_verbatim import (  # noqa: F401  re-exported for callers and test
     _fetch_hop_timeout,
     _github_repo_readme_api_url,
     _has_binary_magic,
+    _HTMLBodyLocator,
     _is_text_candidate_content_type,
     _looks_like_html,
     _looks_like_html_document,
@@ -211,24 +213,21 @@ def fetch_url_raw(
             else:
                 content_type = (resp.headers.get_content_type() or "").lower()
 
-            # Success: read the capped body enforcing the budget between chunks (see _read_capped_body), so a
-            # slow-drip server can't stretch a single resp.read past the deadline.
+            # Read the capped body in chunks, re-checking the budget between each (see _read_capped_body).
+            # Declared HTML reads wider but retains only _MAX_FETCH_BYTES past </head>: a flat cap there
+            # returns head, not content. PDFs stay at max_bytes — refused by magic, never read for xref.
+            declared_html = content_type in ("text/html", "application/xhtml+xml")
             body_error, raw_bytes = _read_capped_body(
                 resp,
-                max_bytes,
+                _MAX_HTML_FETCH_BYTES if declared_html else max_bytes,
                 timeout,
                 deadline,
                 cancel_event,
+                body_window = max_bytes if declared_html else None,
+                charset = resp.headers.get_content_charset() if declared_html else None,
             )
             if body_error is not None:
                 return body_error, "", ""
-
-            if _has_binary_magic(raw_bytes):
-                return (
-                    f"(binary content, {len(raw_bytes)} bytes; not readable as text)",
-                    "",
-                    content_type,
-                )
             break
         else:
             return "Failed to fetch URL: too many redirects.", "", ""
@@ -241,6 +240,14 @@ def fetch_url_raw(
             safe_type = m.group(0) if m else "unknown type"
             return (
                 f"(non-text content: {safe_type}, {len(raw_bytes)} bytes; not readable as text)",
+                "",
+                content_type,
+            )
+
+        # Catch text-labeled binary via its magic signature.
+        if _has_binary_magic(raw_bytes):
+            return (
+                f"(binary content, {len(raw_bytes)} bytes; not readable as text)",
                 "",
                 content_type,
             )
@@ -324,7 +331,9 @@ def fetch_page_text(
             # The raw file is almost always Markdown. Only a real HTML document (a .html README) is converted; a
             # Markdown README that merely opens with a block tag is kept as-is (see _HTML_DOCUMENT_RE).
             if _looks_like_html_document(body):
-                converted = html_to_markdown(body, main_content = True)
+                converted = html_to_markdown(
+                    body, main_content = True, max_span_chars = max_chars // 2
+                )
                 readme_body = converted if converted.strip() else body
             if readme_body.strip():
                 return _truncate_page_text(
@@ -350,5 +359,13 @@ def fetch_page_text(
         # collapse its whitespace.
         return _truncate_page_text(body.strip(), max_chars)
 
-    # Convert HTML to Markdown with the builtin converter (no external deps).
-    return _truncate_page_text(html_to_markdown(body, main_content = True), max_chars)
+    # Convert HTML to Markdown with the builtin converter (no external deps). Same-site links are kept
+    # while the page fits and dropped to their text when it does not. Gated on length alone:
+    # upstream's extra _dense_char_limit density re-scan stays out of scope here.
+    site_links = SiteLinks(url)
+    text = html_to_markdown(
+        body, main_content = True, site_links = site_links, max_span_chars = max_chars // 2
+    )
+    if text and len(text) <= max_chars:
+        return text
+    return _truncate_page_text(site_links.strip(text), max_chars)

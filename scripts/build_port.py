@@ -31,6 +31,8 @@ SYMBOLS = (
     "_SEARCH_ENGINE_TIERS",
     "EMPTY_SEARCH_RESULTS",
     "_DDGS_EMPTY_SWEEP",
+    "_DDGS_RESET_MARKERS",
+    "_DDGS_HTTP1_RETRY_LOCK",
     "_resolve_engine_tiers",
     "_search_failure_message",
     # tool schema + argument canonicalisation
@@ -45,6 +47,7 @@ SYMBOLS = (
     "_MIN_PAGE_CHARS",
     "_PAGE_CONTEXT_SHARE",
     "_MAX_FETCH_BYTES",
+    "_MAX_HTML_FETCH_BYTES",
     "_IRI_PATH_SAFE",
     "_IRI_QUERY_SAFE",
     "_USER_AGENTS",
@@ -61,6 +64,7 @@ SYMBOLS = (
     "_HTML_LEADING_TAGS",
     "_HTML_LEADING_RE",
     "_HTML_DOCUMENT_RE",
+    "_HTMLBodyLocator",
     "_GITHUB_NON_OWNER_SEGMENTS",
     "_GITHUB_NAME_RE",
     "_DOTTED_HOST_RE",
@@ -87,6 +91,16 @@ SYMBOLS = (
     "_PinnedHTTPHandler",
     "_explicit_proxy_applies",
     "_redirect_hop",
+    # ddgs hardening: registry parsers and the HTTP/1.1 replay for connection resets (#12638)
+    "_class_token",
+    "_YAHOO_SECTION_TITLES",
+    "_YAHOO_SECTION_SNIPPET",
+    "_install_yahoo_layout_parser",
+    "_is_connection_reset",
+    "_ddgs_http1_replay",
+    "_install_ddgs_http1_retry",
+    "_wrap_ddgs_client",
+    "_usable_search_results",
 )
 
 HEADER = '''# SPDX-License-Identifier: AGPL-3.0-only
@@ -107,7 +121,9 @@ search.py instead, marked adapted.
 from __future__ import annotations
 
 import codecs
+import functools
 import http.client
+import logging
 import os
 import queue
 import random
@@ -117,6 +133,11 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
+
+# Upstream binds `logger = get_logger(__name__)` from studio's own logging module, which is not part of
+# the ported surface. stdlib stand-in: no handler configured, so the hardening layers stay silent.
+logger = logging.getLogger(__name__)
 
 '''
 

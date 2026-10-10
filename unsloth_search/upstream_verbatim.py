@@ -16,7 +16,9 @@ search.py instead, marked adapted.
 from __future__ import annotations
 
 import codecs
+import functools
 import http.client
+import logging
 import os
 import queue
 import random
@@ -26,6 +28,11 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
+
+# Upstream binds `logger = get_logger(__name__)` from studio's own logging module, which is not part of
+# the ported surface. stdlib stand-in: no handler configured, so the hardening layers stay silent.
+logger = logging.getLogger(__name__)
 
 
 
@@ -42,6 +49,18 @@ EMPTY_SEARCH_RESULTS = (
 
 
 _DDGS_EMPTY_SWEEP = "No results found"
+
+
+_DDGS_RESET_MARKERS = (
+    "connection reset",
+    "h2 connection driver error",
+    "server disconnected",
+    "broken pipe",
+    "forcibly closed",  # Windows WSAECONNRESET (10054)
+)
+
+
+_DDGS_HTTP1_RETRY_LOCK = threading.Lock()
 
 
 _SEARCH_ENGINE_TIERS = (
@@ -112,7 +131,7 @@ def canonicalize_web_search_arguments(arguments) -> dict:
     return canonical
 
 
-_MAX_PAGE_CHARS = 16000  # cap fetched page text (after HTML-to-MD conversion)
+_MAX_PAGE_CHARS = 16000  # fetched page cap after HTML-to-Markdown conversion
 
 
 _PAGE_CONTEXT_SHARE = 0.35
@@ -122,6 +141,9 @@ _MIN_PAGE_CHARS = 2000
 
 
 _MAX_FETCH_BYTES = 512 * 1024
+
+
+_MAX_HTML_FETCH_BYTES = 8 * 1024 * 1024
 
 
 _IRI_PATH_SAFE = "/%:@!$&'()*+,;="
@@ -546,7 +568,7 @@ def _resolve_with_budget(hostname, port, deadline, cancel_event):
     def _resolve():
         try:
             result.put(_validate_and_resolve_host(hostname, port))
-        except Exception as exc:  # defensive: never let the worker die silently
+        except Exception as exc:  # prevent the resolver thread from failing silently
             result.put((False, f"Failed to resolve host: {exc}", []))
 
     threading.Thread(target = _resolve, name = "web-fetch-dns", daemon = True).start()
@@ -560,20 +582,184 @@ def _resolve_with_budget(hostname, port, deadline, cancel_event):
             continue
 
 
-def _read_capped_body(resp, max_bytes, timeout, deadline, cancel_event):
-    """Read up to ``max_bytes``, enforcing the overall budget between chunks. A single
-    ``resp.read(max_bytes)`` can block for the whole transfer if the server dribbles bytes just
-    inside each socket-inactivity timeout, so the body is read in chunks with the budget
-    re-checked (and the socket timeout re-tightened toward the deadline) each round. The joined
-    bytes are identical to one capped read. Returns ``(error_or_None, body_bytes)``."""
-    # Best-effort handle on the underlying socket so its timeout tightens as the deadline nears; absent on test
-    # doubles, where the between-chunk budget check still bounds the read.
-    sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
-    # A buffered read(n) keeps receiving until n bytes arrive, so a drip never reaches the
-    # budget check; read1 returns after one receive.
+class _HTMLBodyLocator(HTMLParser):
+    """locate the explicit or implied document body without matching markup inside head content."""
+
+    _PENDING_LIMIT = 65536
+    _CDATA_TAIL_BYTES = 64
+    _HEAD_ELEMENTS = frozenset(
+        {
+            "base",
+            "basefont",
+            "bgsound",
+            "link",
+            "meta",
+            "noframes",
+            "noscript",
+            "script",
+            "style",
+            "template",
+            "title",
+        }
+    )
+    _HEAD_TEXT_ELEMENTS = frozenset({"noframes", "noscript", "script", "style", "title"})
+
+    def __init__(self, charset = None):
+        super().__init__(convert_charrefs = False)
+        self.body_at = None
+        self._absolute_offset = 0
+        self._head_text_depth = 0
+        self._template_depth = 0
+        self._prefix = b""
+        self._decoder = None
+        self._codec = "latin-1"
+        self._deferred = []
+        self._deferred_chars = 0
+        try:
+            codec = codecs.lookup(charset).name if charset else None
+        except (LookupError, ValueError):
+            codec = None
+        if codec in ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"):
+            self._codec = codec if codec.endswith(("-le", "-be")) else codec + "-le"
+
+    def feed_bytes(self, data):
+        if self._decoder is None:
+            self._prefix += data
+            if len(self._prefix) < 4:
+                return
+            data, self._prefix = self._prefix, b""
+            for bom, codec in (
+                (codecs.BOM_UTF32_LE, "utf-32-le"),
+                (codecs.BOM_UTF32_BE, "utf-32-be"),
+                (codecs.BOM_UTF16_LE, "utf-16-le"),
+                (codecs.BOM_UTF16_BE, "utf-16-be"),
+            ):
+                if data.startswith(bom):
+                    self._codec = codec
+                    self._absolute_offset = len(bom)
+                    data = data[len(bom) :]
+                    break
+            self._decoder = codecs.getincrementaldecoder(self._codec)(errors = "replace")
+        decoded = self._decoder.decode(data)
+        if len(self.rawdata) > self._PENDING_LIMIT and not self.cdata_elem:
+            self._deferred.append(decoded)
+            self._deferred_chars += len(decoded)
+            if self._deferred_chars < len(self.rawdata):
+                return
+            decoded = "".join(self._deferred)
+            self._deferred.clear()
+            self._deferred_chars = 0
+        self.feed(decoded)
+        if self.body_at is not None or len(self.rawdata) <= self._PENDING_LIMIT:
+            return
+        if self.cdata_elem:
+            discard = len(self.rawdata) - self._CDATA_TAIL_BYTES
+            self.updatepos(0, discard)
+            self.rawdata = self.rawdata[discard:]
+
+    def updatepos(self, i, j):
+        if j > i:
+            self._absolute_offset += (
+                j - i
+                if self._codec == "latin-1"
+                else len(self.rawdata[i:j].encode(self._codec, errors = "replace"))
+            )
+        return super().updatepos(i, j)
+
+    def _offset(self):
+        return self._absolute_offset
+
+    def _mark_body(self):
+        if self.body_at is None:
+            self.body_at = self._offset()
+
+    def handle_starttag(self, tag, attrs):
+        if self.body_at is not None:
+            return
+        if self._template_depth:
+            if tag == "template":
+                self._template_depth += 1
+            return
+        if tag == "template":
+            self._template_depth = 1
+            return
+        if self._head_text_depth:
+            if tag in self._HEAD_TEXT_ELEMENTS:
+                self._head_text_depth += 1
+            return
+        if tag in ("html", "head"):
+            return
+        if tag == "body":
+            self._mark_body()
+            return
+        if tag in self._HEAD_ELEMENTS:
+            if tag in self._HEAD_TEXT_ELEMENTS:
+                self._head_text_depth = 1
+            return
+        self._mark_body()
+
+    def handle_startendtag(self, tag, attrs):
+        if (
+            self.body_at is None
+            and not self._template_depth
+            and not self._head_text_depth
+            and tag not in self._HEAD_ELEMENTS
+            and tag not in ("html", "head")
+        ):
+            self._mark_body()
+
+    def handle_endtag(self, tag):
+        if self.body_at is not None:
+            return
+        if self._template_depth:
+            if tag == "template":
+                self._template_depth -= 1
+            return
+        if self._head_text_depth:
+            if tag in self._HEAD_TEXT_ELEMENTS:
+                self._head_text_depth -= 1
+            return
+        if tag == "head":
+            self._mark_body()
+
+    def handle_data(self, data):
+        if self._offset() == 0 and data.startswith(codecs.BOM_UTF8.decode("latin-1")):
+            data = data[len(codecs.BOM_UTF8) :]
+        if (
+            self.body_at is None
+            and not self._template_depth
+            and not self._head_text_depth
+            and data.strip()
+        ):
+            self._mark_body()
+
+    def handle_entityref(self, name):
+        from html import unescape
+        self.handle_data(unescape("&" + name + ";"))
+
+    def handle_charref(self, name):
+        self.handle_entityref("#" + name)
+
+
+def _read_capped_body(
+    resp,
+    max_bytes,
+    timeout,
+    deadline,
+    cancel_event,
+    body_window = None,
+    charset = None,
+):
+    """read at most ``max_bytes``, and ``body_window`` past the end of ``<head>``; returns ``(error, body)``."""
+    # HTTPError exposes the socket for deadline updates; chunk checks bound test doubles without one
+    fp = getattr(resp, "fp", None)
+    sock = getattr(getattr(getattr(fp, "fp", fp), "raw", None), "_sock", None)
+    # read1 avoids buffered read(n) waiting for n bytes past the budget
     read = getattr(resp, "read1", None) or resp.read
     chunks = []
     remaining = max_bytes
+    body_at = None
+    body_locator = _HTMLBodyLocator(charset) if body_window is not None else None
     while remaining > 0:
         budget_error = _fetch_budget_exceeded(deadline, cancel_event)
         if budget_error is not None:
@@ -592,6 +778,15 @@ def _read_capped_body(resp, max_bytes, timeout, deadline, cancel_event):
             break
         chunks.append(chunk)
         remaining -= len(chunk)
+        if body_locator is not None and body_at is None:
+            got = max_bytes - remaining
+            try:
+                body_locator.feed_bytes(chunk)
+            except Exception:
+                body_locator = None
+            if body_locator is not None and body_locator.body_at is not None:
+                body_at = body_locator.body_at
+                remaining = max(0, min(remaining, body_at + body_window - got))
     budget_error = _fetch_budget_exceeded(deadline, cancel_event)
     if budget_error is not None:
         try:
@@ -762,3 +957,172 @@ def _resolve_engine_tiers(text_engines) -> list:
         if live:
             resolved.append(",".join(live))
     return resolved
+
+
+def _class_token(name: str) -> str:
+    return f"contains(concat(' ', normalize-space(@class), ' '), ' {name} ')"
+
+
+_YAHOO_SECTION_TITLES = (
+    f"//a[{_class_token('s-title')}][ancestor::section[1][{_class_token('algo')}]]"
+)
+
+
+_YAHOO_SECTION_SNIPPET = f"following::*[self::p[{_class_token('s-desc')}] or self::a[{_class_token('s-title')}]][1][self::p]"
+
+
+def _install_yahoo_layout_parser(text_engines) -> None:
+    """Parse Yahoo's ``section.algo`` pages, which ddgs 9.8.0-9.16.0 (``div.relsrch`` only) read as
+    empty. ddgs builds engines from this registry by name; ``relsrch`` pages keep ddgs's parser."""
+    yahoo = (text_engines or {}).get("yahoo")
+    if not isinstance(yahoo, type) or getattr(yahoo, "_parses_section_layout", False):
+        return
+
+    class _Yahoo(yahoo):
+        _parses_section_layout = True
+
+        def extract_results(self, html_text):
+            results = super().extract_results(html_text)
+            if results:
+                return results
+            tree = self.extract_tree(self.pre_process_html(html_text))
+            for link in tree.xpath(_YAHOO_SECTION_TITLES):
+                # TextResult strips tags and collapses whitespace on assignment.
+                result = self.result_type()
+                result.title = link.get("aria-label") or "".join(
+                    link.xpath(f".//text()[not(ancestor::span[{_class_token('title-url')}])]")
+                )
+                result.href = link.get("href") or ""
+                snippet = link.xpath(_YAHOO_SECTION_SNIPPET)
+                if snippet:
+                    result.body = snippet[0].xpath("string()")
+                results.append(result)
+            return results
+
+    text_engines["yahoo"] = _Yahoo
+
+
+def _is_connection_reset(exc) -> bool:
+    return any(marker in f"{type(exc).__name__}: {exc}".lower() for marker in _DDGS_RESET_MARKERS)
+
+
+def _ddgs_http1_replay(args, kwargs, config):
+    import httpx
+
+    verify = config["verify"]
+    if isinstance(verify, str):
+        verify = ssl.create_default_context(cafile = verify)
+    with httpx.Client(
+        headers = config["headers"],
+        cookies = config["cookies"],
+        proxy = config["proxy"],
+        timeout = config["timeout"],
+        verify = verify,
+        follow_redirects = config["follow_redirects"],
+        http1 = True,
+        http2 = False,
+    ) as client:
+        resp = client.request(*args, **kwargs)
+        resp.read()
+        return resp
+
+
+def _install_ddgs_http1_retry() -> None:
+    """Replay a ddgs request once over plain HTTP/1.1 after a connection reset (#12638): primp has
+    no HTTP/1.1-only mode. Successful requests are untouched; wraps each class once; never raises."""
+    try:
+        import inspect
+
+        from ddgs import http_client
+        from ddgs.exceptions import DDGSException
+
+        def _wrapper(response_cls):
+            # ddgs 9.14's primp Response wraps the raw response; 9.8.0's and HttpClient2's take fields.
+            if "status_code" not in inspect.signature(response_cls).parameters:
+                return response_cls
+            return lambda resp: response_cls(
+                status_code = resp.status_code, content = resp.content, text = resp.text
+            )
+
+        targets = [(http_client.HttpClient, _wrapper(http_client.Response), True)]
+        try:
+            from ddgs import http_client2
+        except ImportError:
+            http_client2 = None
+        if http_client2 is not None and hasattr(http_client2, "HttpClient2"):
+            # HttpClient2 does not follow redirects; primp does.
+            targets.append((http_client2.HttpClient2, _wrapper(http_client2.Response), False))
+
+        with _DDGS_HTTP1_RETRY_LOCK:
+            for cls, wrap, follow_redirects in targets:
+                if cls.__dict__.get("_unsloth_http1_retry"):
+                    continue
+                _wrap_ddgs_client(
+                    cls, wrap, follow_redirects, inspect.signature(cls.__init__), DDGSException
+                )
+    except Exception:  # noqa: BLE001 - the retry is a hardening layer, never a reason to fail a search
+        logger.debug("ddgs HTTP/1.1 retry not installed", exc_info = True)
+
+
+def _wrap_ddgs_client(cls, wrap, follow_redirects, signature, ddgs_exception) -> None:
+    orig_init, orig_request = cls.__init__, cls.request
+
+    @functools.wraps(orig_init)
+    def __init__(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        try:
+            bound = signature.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            config = dict(bound.arguments)
+            config.pop("self", None)  # no client -> config -> client cycle
+            self._unsloth_http1_config = config
+        except TypeError:
+            pass
+
+    @functools.wraps(orig_request)
+    def request(self, *args, **kwargs):
+        start = time.monotonic()
+        try:
+            return orig_request(self, *args, **kwargs)
+        except Exception as exc:
+            config = getattr(self, "_unsloth_http1_config", None)
+            if config is None or not _is_connection_reset(exc):
+                raise
+            timeout = config.get("timeout")
+            if timeout:
+                timeout -= time.monotonic() - start
+                if timeout <= 0:
+                    raise
+            client = getattr(self, "client", None)
+            # httpx's jar only: primp 0.15 (ddgs 9.8.0) get_cookies aborts the process on a miss.
+            cookies = getattr(client, "cookies", None)
+            # httpx may lack primp's zstd decoder, so let it pick accept-encoding.
+            session = getattr(client, "headers", None) or {}
+            headers = {k: v for k, v in dict(session).items() if k.lower() != "accept-encoding"}
+            replay = {
+                "headers": headers,
+                "cookies": cookies,
+                "proxy": config.get("proxy"),
+                "timeout": timeout,
+                "verify": config.get("verify", True),
+                "follow_redirects": follow_redirects,
+            }
+            try:
+                return wrap(_ddgs_http1_replay(args, kwargs, replay))
+            except Exception as retry_exc:
+                raise ddgs_exception(
+                    f"{exc}; HTTP/1.1 retry failed: {type(retry_exc).__name__}: {retry_exc}"
+                ) from retry_exc
+
+    cls.__init__, cls.request = __init__, request
+    cls._unsloth_http1_retry = True
+
+
+def _usable_search_results(results, website_policy):
+    from .web_access_policy import check_url_access
+    return [
+        r
+        for r in results
+        if isinstance(r, dict)
+        and check_url_access(str(r.get("href") or "").strip(), website_policy)[0]
+    ]
