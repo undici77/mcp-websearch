@@ -289,9 +289,15 @@ the installed server dies at `import` on a missing symbol.
 Prove the installed tree is the anchored tree, from `$DEST`:
 
 ```bash
-.venv/bin/python scripts/align.py --offline --upstream .align/upstream-stub   # 88 tracked · 88 synced
+.venv/bin/python scripts/align.py --offline --upstream .align/upstream-stub   # 90 tracked · 90 synced
 .venv/bin/python -c "import asyncio,server;print([t.name for t in asyncio.run(server.app.list_tools())])"
 ```
+
+In `$DEST` the stub is not a git repo, so `origin` resolves empty (`align.py:184`) and the printed line
+is the stale-anchor nudge (`align.py:291`), never `ALIGNED.`, however correct the content is. Read the
+counts, not the line. **Never `--bump` in `$DEST`**: it stamps `upstream_commit = ""` (`align.py:294`),
+erasing the anchor. The anchor is owned by the source repo, where `align.py` prints `ALIGNED.` with
+checkout, ref and manifest agreeing.
 
 ## When this becomes its own repo
 
