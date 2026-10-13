@@ -9,6 +9,8 @@ import sys
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+UPSTREAM_REL = os.path.join("studio", "backend", "core", "inference", "tools.py")
 
 
 def sha(path):
@@ -107,3 +109,26 @@ def test_server_exposes_expected_tools():
     for tool in tools:
         hints = tool.annotations.model_dump(by_alias = True)
         assert hints["readOnlyHint"] and hints["openWorldHint"], tool.name
+
+
+def test_stub_is_pinned_to_the_anchor():
+    """The stub stands in for the anchored ref offline, so it must BE that ref: a stale stub fails the
+    correct fix, and a tampered one would make every fidelity test vouch for code nobody reviewed."""
+    import hashlib
+    import json
+
+    manifest = json.load(open(os.path.join(ROOT, ".align", "manifest.json"), encoding = "utf-8"))
+    pinned = manifest.get("stub_sha256")
+    assert pinned, "manifest has no stub_sha256 — run scripts/align.py --sync"
+    stub = os.path.join(ROOT, ".align", "upstream-stub", os.path.dirname(UPSTREAM_REL))
+    if not os.path.isdir(stub):
+        pytest.skip("no stub (fresh clone); align.py --sync recreates it")
+    for name, digest in pinned.items():
+        with open(os.path.join(stub, name), "rb") as fh:
+            assert hashlib.sha256(fh.read()).hexdigest() == digest, f"stub {name} is not the anchored ref"
+
+
+def test_generated_file_binds_every_name_it_uses():
+    import build_port
+
+    assert build_port.closure_gaps(os.path.join(ROOT, build_port.OUT_REL)) == []

@@ -17,5 +17,10 @@
       "upstream_sha256": "e703829966e8ad3e7f8cc64a41dc1b1bbaf1a8444d8a9c44f8756acd5bf86889"
     }
   },
-  "generated_symbols": 73
+  "generated_symbols": 73,
+  "stub_sha256": {
+    "tools.py": "adb80c8656ed5a52eefaea97107cad6d7805fb9c9cb133344efaf90cb15ae895",
+    "web_access_policy.py": "4241a557d63498923063bae2bd3cebe75d5d9510294210db915497d28e99eb83",
+    "_html_to_md.py": "e703829966e8ad3e7f8cc64a41dc1b1bbaf1a8444d8a9c44f8756acd5bf86889"
+  }
 }

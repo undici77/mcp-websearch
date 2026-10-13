@@ -42,10 +42,7 @@ wayback {url, archive: "arquivo"}     → one archive only
 cd mcp-websearch
 python3 -m venv .venv
 .venv/bin/python -m pip install --require-hashes --no-deps -r requirements.lock
-.venv/bin/python -m pip install --no-deps -e .
-python3 scripts/build_port.py          # generate the verbatim surface from tools.py
-.venv/bin/python scripts/align.py --bump
-.venv/bin/python -m pytest -q tests
+.venv/bin/python scripts/align.py --sync   # clone, safety gate, generate, test, egress gates, anchor
 ```
 
 `-m pip` and `-m pytest`, never `.venv/bin/pip`: a venv is not relocatable, so its script

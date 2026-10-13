@@ -13,8 +13,12 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import hashlib
 import os
+import re
+import subprocess
+import symtable
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -146,18 +150,79 @@ logger = logging.getLogger(__name__)
 '''
 
 
-def locate(upstream: str) -> str:
-    for cand in (
-        upstream,
-        os.environ.get("UNSLOTH_UPSTREAM"),
-        DEFAULT_UPSTREAM,
-        os.path.join(ROOT, ".align", "upstream"),
-        # Snapshot of the anchored ref, so the fidelity gate still runs with no clone.
-        os.path.join(ROOT, ".align", "upstream-stub"),
-    ):
-        if cand and os.path.isfile(os.path.join(cand, UPSTREAM_REL)):
-            return os.path.join(cand, UPSTREAM_REL)
-    raise SystemExit(f"cannot find {UPSTREAM_REL} under any known upstream; pass a path")
+STUB = os.path.join(ROOT, ".align", "upstream-stub")
+# The only repository whose code may become "upstream". Any tools.py elsewhere is just a file.
+UPSTREAM_ORIGIN_RE = re.compile(r"^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)unslothai/unsloth(\.git)?/?$")
+
+
+def git(*args: str, cwd: str | None = None) -> str:
+    """argv only, never a shell: paths and refs are data, not command text."""
+    got = subprocess.run(["git", *args], cwd = cwd, capture_output = True, text = True)
+    return got.stdout.strip() if got.returncode == 0 else ""
+
+
+def origin_problem(path: str) -> str | None:
+    """None when *path* is the root of a clone of unslothai/unsloth, else why it is not."""
+    top = git("-C", path, "rev-parse", "--show-toplevel")
+    if not top:
+        return "not a git checkout"
+    if os.path.realpath(top) != os.path.realpath(path):
+        return f"inside another repository ({top})"
+    url = git("-C", path, "remote", "get-url", "origin")
+    if not UPSTREAM_ORIGIN_RE.match(url):
+        return f"origin is {url or '(none)'}, not github.com/unslothai/unsloth"
+    return None
+
+
+def candidates(explicit: str | None):
+    """(path, trusted_without_git). Only an explicit path or the anchored stub may be a non-git
+    snapshot; every implicit location must prove it is an unslothai/unsloth clone."""
+    if explicit:
+        yield explicit, True
+    yield os.environ.get("UNSLOTH_UPSTREAM"), False
+    yield DEFAULT_UPSTREAM, False
+    yield os.path.join(ROOT, ".align", "upstream"), False
+    # Snapshot of the anchored ref, so the fidelity gate still runs with no clone; its hashes are
+    # pinned in the manifest (tests/test_fidelity.py), so it cannot drift silently.
+    yield STUB, True
+
+
+def find_root(explicit: str | None = None, quiet: bool = False) -> str | None:
+    for cand, snapshot_ok in candidates(explicit):
+        if not cand or not os.path.isfile(os.path.join(cand, UPSTREAM_REL)):
+            continue
+        problem = origin_problem(cand)
+        if problem is None or (snapshot_ok and problem == "not a git checkout"):
+            return cand
+        if not quiet:
+            print(f"skipping {cand}: {problem}", file = sys.stderr)
+    return None
+
+
+def locate(upstream: str | None) -> str:
+    root = find_root(upstream)
+    if root is None:
+        raise SystemExit(f"cannot find {UPSTREAM_REL} in a verified unslothai/unsloth clone; pass a path")
+    return os.path.join(root, UPSTREAM_REL)
+
+
+def closure_gaps(path: str) -> list[str]:
+    """Globals the generated file uses but never binds. Importing cannot catch these: they raise
+    NameError only at the call, often inside an except handler that then masks the real error."""
+    table = symtable.symtable(open(path, encoding = "utf-8").read(), path, "exec")
+    bound = {s.get_name() for s in table.get_symbols() if s.is_assigned() or s.is_imported()}
+    need: set[str] = set()
+
+    def walk(t):
+        for s in t.get_symbols():
+            name = s.get_name()
+            if s.is_referenced() and s.is_global() and name not in bound and not hasattr(builtins, name):
+                need.add(name)
+        for child in t.get_children():
+            walk(child)
+
+    walk(table)
+    return sorted(need)
 
 
 def extract(path: str) -> tuple[str, list[str]]:
@@ -201,12 +266,16 @@ def main() -> int:
         current = open(out, encoding = "utf-8").read() if os.path.isfile(out) else ""
         same = hashlib.sha256(current.encode()).hexdigest() == hashlib.sha256(body.encode()).hexdigest()
         # Name the source: a snapshot stub must never read as a live-upstream verdict.
-        origin = "snapshot" if ".align" in src else "live clone"
+        origin = "snapshot" if os.path.realpath(src).startswith(os.path.realpath(STUB)) else "live clone"
         print(("generated file is up to date" if same else "STALE: re-run scripts/build_port.py") + f" ({len(picked)} symbols, {origin}: {src})")
         return 0 if same else 1
 
     with open(out, "w", encoding = "utf-8") as fh:
         fh.write(body)
+    gaps = closure_gaps(out)
+    if gaps:
+        print(f"UNBOUND in generated file (add to SYMBOLS or HEADER): {', '.join(gaps)}", file = sys.stderr)
+        return 1
     print(f"wrote {out}")
     print(f"  {len(picked)} symbols extracted from {src}")
     print(f"  {body.count(chr(10)) + 1} lines, sha256 {hashlib.sha256(body.encode()).hexdigest()[:16]}")

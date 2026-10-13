@@ -21,12 +21,12 @@ for c in python3 python; do
 done
 if [ -z "$PY" ]; then
   warn "no python3 >= 3.9 found; qwen works, search does not. Install Python and re-run."
-  exit 0
+  exit 1
 fi
 step "python: $($PY -V 2>&1)"
 
 step "sync $SRC -> $DEST"
-mkdir -p "$DEST" || { warn "cannot create $DEST"; exit 0; }
+mkdir -p "$DEST" || { warn "cannot create $DEST"; exit 1; }
 if command -v rsync >/dev/null 2>&1; then
   # Keep .align/manifest.json (the contract) and upstream-stub (offline fidelity);
   # drop only the big regenerable caches.
@@ -34,9 +34,9 @@ if command -v rsync >/dev/null 2>&1; then
     --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
     --exclude '.pytest_cache' --exclude '*.egg-info' \
     --exclude '.align/upstream' --exclude '.align/refcache' \
-    "$SRC/" "$DEST/" || { warn "rsync failed"; exit 0; }
+    "$SRC/" "$DEST/" || { warn "rsync failed"; exit 1; }
 else
-  cp -rp "$SRC/." "$DEST/" || { warn "copy failed"; exit 0; }
+  cp -rp "$SRC/." "$DEST/" || { warn "copy failed"; exit 1; }
   # cp honours no excludes, so the source venv came along; a venv is not relocatable.
   rm -rf "$DEST/.venv" 2>/dev/null || true
 fi
@@ -48,17 +48,18 @@ rm -rf "$DEST/.align/upstream" "$DEST/.align/refcache" "$DEST/.pytest_cache" 2>/
 step "venv + hash-pinned deps"
 VP="$DEST/.venv/bin/python"
 if [ ! -x "$VP" ]; then
-  "$PY" -m venv "$DEST/.venv" || { warn "venv failed (need python3-venv on Debian)"; exit 0; }
+  "$PY" -m venv "$DEST/.venv" || { warn "venv failed (need python3-venv on Debian)"; exit 1; }
 fi
 # -m pip, never .venv/bin/pip: a venv is not relocatable and its script shebangs break on a move.
 if [ -f "$DEST/requirements.lock" ]; then
   "$VP" -m pip install --quiet --require-hashes --no-deps -r "$DEST/requirements.lock" \
-    || { warn "hash-pinned install failed — a lock hash no longer matches PyPI. Read the diff; do not re-hash blind."; exit 0; }
-  "$VP" -m pip install --quiet --no-deps -e "$DEST" \
-    || { warn "editable install failed"; exit 0; }
+    || { warn "hash-pinned install failed — a lock hash no longer matches PyPI. Read the diff; do not re-hash blind."; exit 1; }
+  # No `pip install -e .`: its build isolation fetches setuptools from PyPI with no hash, the one
+  # unpinned download in the install. server.py and the tests put the tree on sys.path themselves.
 else
-  warn "no requirements.lock — installing UNPINNED. Regenerate the lock before trusting this install."
-  "$VP" -m pip install --quiet -e "$DEST[dev]" || { warn "pip install failed"; exit 0; }
+  # Unpinned is not a degraded mode, it is an unreviewed dependency set. Refuse.
+  warn "no requirements.lock — refusing to install unpinned dependencies."
+  exit 1
 fi
 
 step "generate verbatim surface + verify"
