@@ -1,9 +1,9 @@
 {
   "upstream_branch": "main",
-  "upstream_commit": "6105cb2d8f86acf5e206546faa1555f8549f99e3",
+  "upstream_commit": "cc7e8aaeb2ebe323daa0f051a4931f7d67580eba",
   "adapted": {
     "_web_search": "7d85c2247abfd9e1",
-    "_fetch_url_raw": "261f399036340de8",
+    "_fetch_url_raw": "77e3db8365c23711",
     "_fetch_page_text": "0141385a4ed40db7",
     "_truncate_page_text": "2aaf78e9ce640dcf",
     "_page_char_budget": "47bb74791242516f",
@@ -14,8 +14,8 @@
       "upstream_sha256": "4241a557d63498923063bae2bd3cebe75d5d9510294210db915497d28e99eb83"
     },
     "_html_to_md.py": {
-      "upstream_sha256": "a9caf6bba9fe51025e2921d510881a058978c3c8901b19705b98154629fdfd51"
+      "upstream_sha256": "e703829966e8ad3e7f8cc64a41dc1b1bbaf1a8444d8a9c44f8756acd5bf86889"
     }
   },
-  "generated_symbols": 71
+  "generated_symbols": 73
 }

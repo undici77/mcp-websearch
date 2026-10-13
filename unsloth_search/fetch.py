@@ -21,6 +21,8 @@ from ._html_to_md import SiteLinks, html_to_markdown
 from .upstream_verbatim import (  # noqa: F401  re-exported for callers and tests
     _BINARY_APPLICATION_SUBTYPES,
     _BINARY_MAGIC,
+    _ContentDecoder,
+    _DECODED_CODINGS,
     _DOTTED_HOST_RE,
     _GITHUB_NAME_RE,
     _GITHUB_NON_OWNER_SEGMENTS,
@@ -102,7 +104,8 @@ def fetch_url_raw(
 
     Same gates, in the same order: scheme, domain policy, non-public-IP refusal, DNS pinning with the
     hostname kept for SNI and cert verification, one wall-clock deadline across every redirect hop, a
-    capped chunked body read, binary rejection by MIME then magic, then declared/BOM/utf-8 decode.
+    capped chunked body read that undoes gzip/deflate, binary rejection by MIME then magic, then
+    declared/BOM/utf-8 decode.
 
     ADAPTED out, both failing closed:
       * PDF text extraction (upstream reads to `_MAX_PDF_FETCH_BYTES` for the EOF xref) — a PDF is
@@ -181,6 +184,7 @@ def fetch_url_raw(
             headers = {
                 "User-Agent": ua,
                 "Host": validated_netloc,
+                "Accept-Encoding": "gzip, deflate",
             }
             if extra_headers:
                 headers.update(extra_headers)
@@ -206,6 +210,12 @@ def fetch_url_raw(
                     return hop_error, "", ""
                 continue
 
+            # Brotli/zstd stay refused: only what _ContentDecoder undoes is decoded.
+            coding = (resp.headers.get("Content-Encoding") or "").strip().lower()
+            if coding not in ("", "identity", *_DECODED_CODINGS):
+                return f"Failed to fetch URL: unsupported Content-Encoding {coding[:40]!r}.", "", ""
+            decoder = _ContentDecoder(coding) if coding in _DECODED_CODINGS else None
+
             # get_content_type() defaults to "text/plain" when the header is absent (RFC 2045); report "" instead so
             # callers can tell a missing header apart from a server that really declared text/plain.
             if resp.headers.get("Content-Type") is None:
@@ -225,6 +235,7 @@ def fetch_url_raw(
                 cancel_event,
                 body_window = max_bytes if declared_html else None,
                 charset = resp.headers.get_content_charset() if declared_html else None,
+                decoder = decoder,
             )
             if body_error is not None:
                 return body_error, "", ""

@@ -83,6 +83,9 @@ SYMBOLS = (
     "_fetch_hop_timeout",
     "_validate_and_resolve_host",
     "_resolve_with_budget",
+    # Content-Encoding: servers send gzip/deflate unasked, so the capped read must undo it (#13532).
+    "_DECODED_CODINGS",
+    "_ContentDecoder",
     "_read_capped_body",
     "_NoRedirect",
     "_pinned_create_connection",
@@ -133,6 +136,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zlib
 from html.parser import HTMLParser
 
 # Upstream binds `logger = get_logger(__name__)` from studio's own logging module, which is not part of

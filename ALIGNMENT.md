@@ -57,7 +57,7 @@ The verbatim surface is **generated**, not copied by hand.
 
 ```
 studio/backend/core/inference/tools.py
-        │  scripts/build_port.py  (AST extraction, 71 symbols, upstream line order)
+        │  scripts/build_port.py  (AST extraction, 73 symbols, upstream line order)
         ▼
 unsloth_search/upstream_verbatim.py      ← GENERATED, DO NOT EDIT
         │  imports, unchanged
@@ -65,14 +65,14 @@ unsloth_search/upstream_verbatim.py      ← GENERATED, DO NOT EDIT
 unsloth_search/fetch.py · search.py      ← the hand-written adapted functions
 ```
 
-A transcription error is no longer possible in 71 of the 77 ported symbols: they are emitted by a
+A transcription error is no longer possible in 73 of the 79 ported symbols: they are emitted by a
 script from upstream's AST, and the same upstream commit always produces the same sha256.
 
 ## The four surfaces
 
 | surface | count | test | when it shouts |
 |---|---|---|---|
-| `generated` | 71 | re-extract from upstream, compare each symbol's AST | upstream changed → `scripts/build_port.py` fixes it |
+| `generated` | 73 | re-extract from upstream, compare each symbol's AST | upstream changed → `scripts/build_port.py` fixes it |
 | `vendored` | 2 | sha256 both ways (`web_access_policy.py`, `_html_to_md.py`) | upstream changed → `cp` |
 | `adapted` | 6 | upstream fingerprint vs the one recorded at sync | upstream touched it → read and re-justify |
 | `out-of-scope` / `annotated` | 9 | presence + churn | upstream grew the feature, or deleted it |
@@ -213,6 +213,7 @@ variable, same default, so the diff stays honest without a rename.
 | `_HTMLBodyLocator`, `_MAX_HTML_FETCH_BYTES`, `body_window`/`charset` args | a flat `_MAX_FETCH_BYTES` cap returns `<head>`, not content. Wider read, same text out, no new egress or schema field |
 | `_install_yahoo_layout_parser`, `_install_ddgs_http1_retry`, `_wrap_ddgs_client`, `_ddgs_http1_replay`, `_is_connection_reset`, `_DDGS_RESET_MARKERS`, `_DDGS_HTTP1_RETRY_LOCK`, `_class_token`, `_YAHOO_SECTION_*` | ddgs-side gaps, not tier gaps: Yahoo is tier 2 and `section.algo` parses empty; the replay answers resets and `tls handshake eof`. Idempotent, renames no engine |
 | `_usable_search_results` | the tier gate above |
+| `_ContentDecoder`, `_DECODED_CODINGS`, `Accept-Encoding: gzip, deflate` | servers send gzip unasked, even against urllib's default `identity`; undecoded the body reaches the model as binary garbage. Same bytes, same host, no new schema field. Brotli/zstd stay refused (#13532) |
 | upstream's `or href` title fallback | absorb it; keep `clip.py` — with no spill, one uncapped hit fills the channel |
 
 If upstream grows a new web/search symbol, `align.py` prints it under `NEW?`. Port it, or add it to
@@ -263,6 +264,11 @@ PY
 `HEADER` binds `logger = logging.getLogger(__name__)` — the only non-upstream binding in the generated
 file. Keep it: upstream's `get_logger(__name__)` lives in studio's logging module, outside the ported
 surface, and `_install_ddgs_http1_retry` calls `logger.debug`.
+
+`HEADER`'s import list is not free either: a ported symbol can drag a stdlib module it names in an
+`except` clause, and the missing import surfaces as `NameError` *inside* the handler, masking the real
+error. `_read_capped_body` catches `zlib.error` (#13532), so `HEADER` imports `zlib`. The `symtable`
+closure check below is what catches this; importing the file does not.
 
 ## Install: a stale `.align/upstream` in DEST outranks the anchor
 
