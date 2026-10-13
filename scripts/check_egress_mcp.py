@@ -50,6 +50,14 @@ def approved_hosts():
     # client's per-call prompt, never by this list.
     return {ENGINE_HOSTS[e] for e in tiers} | {"serpapi.com"}
 
+
+def archive_hosts():
+    """Fork-owned `wayback` tool, gated by `--wayback` only: a search reaching an archive is a bug.
+    Fixed hosts, not tiers; derived from wayback.ARCHIVES, never a parallel copy."""
+    from unsloth_search.wayback import archive_hosts as hosts
+
+    return hosts()
+
 _seen = []
 _lock = threading.Lock()
 
@@ -163,11 +171,24 @@ def main() -> int:
     print(f"  self-test   : proxy caught {SELFTEST_HOST} ✓")
     _seen.clear()
 
-    query = os.environ.get("WEBSEARCH_EGRESS_QUERY", "python packaging standards")
     started = time.monotonic()
-    from unsloth_search.search import web_search
+    if "--wayback" in sys.argv[1:]:
+        # Each archive pinned in turn, so a silent fallback cannot hide one of them from the gate.
+        from unsloth_search.wayback import ORDER, wayback_fetch
 
-    out = web_search(query, timeout = 60)
+        # The fetcher pins validated IPs, so a pinned CONNECT names an IP the gate cannot judge.
+        # Upstream's proxy path keeps the hostname in CONNECT; test-time only, this process only.
+        os.environ["UNSLOTH_STUDIO_DISABLE_DNS_PINNING"] = "1"
+
+        query = os.environ.get("WEBSEARCH_EGRESS_ARCHIVED_URL", "https://www.python.org/")
+        out = "".join(wayback_fetch(query, archive = name, timeout = 60) for name in ORDER)
+        allowed = archive_hosts()
+    else:
+        query = os.environ.get("WEBSEARCH_EGRESS_QUERY", "python packaging standards")
+        from unsloth_search.search import web_search
+
+        out = web_search(query, timeout = 60)
+        allowed = approved_hosts()
     time.sleep(0.5)
     httpd.shutdown()
 
@@ -176,7 +197,7 @@ def main() -> int:
     print(f"  egress hosts: {hosts or 'NONE'}")
 
     if not hosts:
-        bypassed = out and "Search failed" not in out and "No results" not in out
+        bypassed = out and "Search failed" not in out and "No results" not in out and "No archived copy" not in out
         if bypassed:
             print("✗ The search succeeded but NOTHING passed the proxy — primp bypasses it.")
             print("  This gate cannot observe the tiers. Use strace (IPs) or accept BLIND+ack.")
@@ -184,7 +205,7 @@ def main() -> int:
         print("✗ No egress recorded and the search produced no results — inconclusive, not clean.")
         return 2
 
-    unexpected = [h for h in hosts if h not in approved_hosts()]
+    unexpected = [h for h in hosts if h not in allowed]
     if unexpected:
         print(f"✗ {len(unexpected)} host(s) outside the approved tiers: {unexpected}")
         print("  Fix the tier list, or map the engine in ENGINE_HOSTS and record why.")

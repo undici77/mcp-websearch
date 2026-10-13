@@ -100,7 +100,7 @@ elif command -v qwen >/dev/null 2>&1; then
   qwen mcp remove websearch >/dev/null 2>&1 || true
   qwen mcp add websearch "$DEST/.venv/bin/python" "$DEST/server.py" \
     -t stdio -s user --description "Keyless web search, ported from Unsloth Studio" \
-    && echo "  registered: mcp__websearch__web_search" \
+    && echo "  registered: mcp__websearch__web_search, mcp__websearch__wayback" \
     || warn "qwen mcp add failed — add it by hand from qwen-mcp-snippet.json"
 else
   warn "qwen not on PATH; merge qwen-mcp-snippet.json into ~/.qwen/settings.json by hand"

@@ -14,6 +14,28 @@ Qwen Code ─MCP/stdio→ server.py → ddgs → tier 1: wikipedia brave duckduc
 Engines outside those tiers — **Yandex, Bing, the mullvad mirrors** — are never contacted. Tier 3 is
 this fork's own paid fallback, not upstream, and is inert without a key.
 
+## Web archives (`wayback` tool, fork-owned)
+
+A second tool reads archived copies of pages that are gone, changed, or unreachable. It is **not
+upstream** and never runs on its own: when `web_search` url mode fails on an HTTP error, a dead host
+or a timeout, the result only *suggests* a `wayback` call, which the client confirms like any other.
+
+```
+wayback {url}                         → Wayback Machine latest capture, else Arquivo.pt
+wayback {url, timestamp: "2015"}      → capture closest to that date (YYYY / YYYYMMDD / YYYYMMDDhhmmss)
+wayback {url, list_snapshots: true}   → readable captures from both archives, newest first
+wayback {url, archive: "arquivo"}     → one archive only
+```
+
+- **Hosts:** `archive.org` and `arquivo.pt`, nothing else. Every request carries a policy admitting
+  only the archive that serves it, so a redirect cannot leave it.
+- **Guards:** every byte goes through upstream's unchanged fetcher — SSRF refusal, DNS pinning,
+  redirect re-checks, body cap, html→md.
+- **Policy:** `allowed_domains` / `blocked_domains` judge the **original** URL, not the archive.
+  Literal private/loopback addresses are refused even though the bytes would come from the archive.
+- **Known limit:** a Wayback capture that was itself a redirect replays as a hop to another
+  capture inside archive.org; that target's original domain is not re-judged by your policy.
+
 ## Install
 
 ```bash
@@ -57,6 +79,13 @@ Exit `0` = every destination inside the tiers · `1` = a host outside them · `2
 blind (self-test canary missed, or primp bypassed the proxy). The allowlist is derived from
 `_SEARCH_ENGINE_TIERS` through `ENGINE_HOSTS`, so adding an engine without mapping its host fails
 the build rather than widening egress silently.
+
+```bash
+.venv/bin/python scripts/check_egress_mcp.py --wayback   # archive hosts only: archive.org, arquivo.pt
+```
+
+The archive run sets `UNSLOTH_STUDIO_DISABLE_DNS_PINNING=1` in its own process: a pinned CONNECT
+names an IP, and the gate judges hostnames. Search mode must never reach an archive host.
 
 Run it: every release · every `requirements.lock` bump · after realignment · after any change to
 `fetch.py` or the tier list. It issues one live query.

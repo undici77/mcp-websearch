@@ -235,6 +235,29 @@ print([n for n in un if any(k in n.lower() for k in ("fetch", "search", "html", 
 PY
 ```
 
+## Fork-owned, outside the watched surface
+
+New capabilities the maintainer approved. They **call** upstream symbols and never edit or shadow
+them, so `align.py` cannot report them and no anchor bump is ever owed for them. If an align run
+regenerates something they call, `pytest` is what catches the break, not `align.py`.
+
+| file | what | egress | gate |
+|---|---|---|---|
+| `serpapi.py` | tier 3, paid, key-gated | `serpapi.com` | `check_egress_mcp.py` |
+| `wayback.py` + `wayback` tool in `server.py` | archived copies: Wayback Machine, then Arquivo.pt | `archive.org`, `arquivo.pt` | `check_egress_mcp.py --wayback` |
+| `server.py` url-mode hint | text only: suggests `wayback` after an HTTP error, a dead host or a timeout | none | `tests/test_wayback.py` |
+
+Rules for anything added here:
+
+- Fetch **only** through `fetch_url_raw` / `fetch_page_text`. A second HTTP stack would bypass every
+  SSRF and pinning gate this port exists to keep.
+- Judge the caller's website policy against the URL the model named. Pin each fixed host with its
+  own `allowedDomains` policy so a redirect can never leave it.
+- Never edit `search.py` / `fetch.py` to wire a feature in. Wrap it in `server.py`, as the hint does.
+  Those are ADAPTED, and every local line there is a line to re-justify at the next `REVIEW`.
+- Add the hosts to the egress gate as a **separate** set. `approved_hosts()` stays tiers + serpapi
+  only (`test_gate_covers_exactly_the_tiers_plus_serpapi`), because search reaching an archive is a bug.
+
 ## Adding a symbol
 
 1. Add the name to `SYMBOLS` in `scripts/build_port.py` (verbatim) **or** to `ADAPTED` in

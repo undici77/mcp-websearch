@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.check_egress_mcp import ENGINE_HOSTS, approved_hosts  # noqa: E402
+from scripts.check_egress_mcp import ENGINE_HOSTS, approved_hosts, archive_hosts  # noqa: E402
 from unsloth_search.upstream_verbatim import _SEARCH_ENGINE_TIERS  # noqa: E402
 
 
@@ -34,3 +34,9 @@ def test_yandex_is_never_approved():
 def test_url_mode_host_is_not_pre_approved():
     # url mode reaches a host the model names; nothing in the gate may pre-authorise that.
     assert "example.com" not in approved_hosts()
+
+
+def test_archive_gate_is_exactly_the_two_archives_and_apart_from_search():
+    # Search mode must never reach an archive; the wayback gate admits nothing else.
+    assert archive_hosts() == {"archive.org", "arquivo.pt"}
+    assert not archive_hosts() & approved_hosts()

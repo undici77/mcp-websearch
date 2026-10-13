@@ -93,10 +93,17 @@ def test_yandex_and_bing_are_never_reachable():
     assert "auto" not in flat, "backend=auto is the Yandex fan-out this exists to prevent"
 
 
-def test_server_exposes_exactly_one_tool():
+def test_server_exposes_expected_tools():
+    """web_search mirrors upstream; wayback is the one fork-owned addition (ALIGNMENT.md)."""
     import asyncio
 
     import server
 
     tools = asyncio.run(server.app.list_tools())
-    assert [t.name for t in tools] == ["web_search"]
+    assert [t.name for t in tools] == ["web_search", "wayback"]
+    schema = getattr(tools[0], "input_schema", None) or tools[0].inputSchema
+    web = schema["properties"]
+    assert set(web) == {"query", "url", "max_results", "timeout", "allowed_domains", "blocked_domains"}
+    for tool in tools:
+        hints = tool.annotations.model_dump(by_alias = True)
+        assert hints["readOnlyHint"] and hints["openWorldHint"], tool.name
