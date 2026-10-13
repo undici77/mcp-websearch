@@ -46,6 +46,28 @@ def test_risky_features_are_seen(src, expected):
     assert expected <= _f(src)
 
 
+@pytest.mark.parametrize(
+    "src, expected",
+    [
+        # An alias must not hide the real name: a vendored file that already imports os could
+        # otherwise add either line with zero findings.
+        ("from os import system\nsystem(x)", {"call:os.system", "import:os.system"}),
+        ("import os as o\no.system(x)", {"call:os.system"}),
+        ("from subprocess import run as r\nr(x)", {"call:subprocess.run"}),
+        ("from os import environ\nenviron['SERPAPI_API_KEY']", {"env:SERPAPI_API_KEY"}),
+        ("from os import system as s\nf = s", {"ref:os.system"}),
+    ],
+)
+def test_aliases_do_not_hide_risky_names(src, expected):
+    assert expected <= _f(src)
+
+
+def test_an_aliased_call_into_an_existing_import_is_still_new():
+    accepted = {"m": _f("import os\nos.path.join(a)")}
+    candidate = {"m": _f("import os\nimport os as o\nos.path.join(a)\no.system(x)")}
+    assert ("m", "call:os.system") in findings(accepted, candidate)
+
+
 def test_blob_is_seen_but_word_lists_are_not():
     assert any(f.startswith("blob:") for f in _f("b = '" + "QUJD" * 80 + "'"))
     assert not any(f.startswith("blob:") for f in _f("c = '" + "AED AFN ALL " * 40 + "'"))

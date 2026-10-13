@@ -70,15 +70,43 @@ def _risky(name: str) -> bool:
                (p in ("os.exec", "os.spawn") and name.startswith(p)) for p in RISKY)
 
 
+def _aliases(node) -> dict[str, str]:
+    """Local name -> what it really is, so `from os import system` and `import os as o` cannot hide
+    `os.system` behind a name the rules do not match."""
+    out: dict[str, str] = {}
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Import):
+            for a in sub.names:
+                if a.asname:
+                    out[a.asname] = a.name
+        elif isinstance(sub, ast.ImportFrom) and sub.module:
+            for a in sub.names:
+                out[a.asname or a.name] = f"{sub.module}.{a.name}"
+    return out
+
+
 def features(node) -> set[str]:
     """Risky features of one symbol or module, as stable 'rule:detail' strings."""
     out: set[str] = set()
+    aliases = _aliases(node)
+
+    def resolve(n) -> str:
+        name = dotted(n)
+        head, _, rest = name.partition(".")
+        if head in aliases:
+            return aliases[head] + ("." + rest if rest else "")
+        return name
+
     for sub in ast.walk(node):
-        if isinstance(sub, (ast.Import, ast.ImportFrom)):
-            mods = [a.name for a in sub.names] if isinstance(sub, ast.Import) else [sub.module or "."]
-            out.update(f"import:{m}" for m in mods)
+        if isinstance(sub, ast.Import):
+            out.update(f"import:{a.name}" for a in sub.names)
+        elif isinstance(sub, ast.ImportFrom):
+            # Per imported name, not per module: `from os import system` must differ from `from os import path`.
+            mod = sub.module or "."
+            out.update(f"import:{mod}.{a.name}" for a in sub.names)
+            out.update(f"ref:{mod}.{a.name}" for a in sub.names if _risky(f"{mod}.{a.name}"))
         elif isinstance(sub, ast.Call):
-            name = dotted(sub.func)
+            name = resolve(sub.func)
             if _risky(name):
                 out.add(f"call:{name}")
             if name in ("open", "io.open", "os.open", "os.fdopen") or name.endswith(".open"):
@@ -93,13 +121,15 @@ def features(node) -> set[str]:
             if name in ("os.getenv", "os.environ.get", "os.environ.setdefault", "os.environ.pop"):
                 key = sub.args[0].value if sub.args and isinstance(sub.args[0], ast.Constant) else "<dynamic>"
                 out.add(f"env:{key}")
-        elif isinstance(sub, ast.Subscript) and dotted(sub.value) == "os.environ":
+        elif isinstance(sub, ast.Subscript) and resolve(sub.value) == "os.environ":
             key = sub.slice.value if isinstance(sub.slice, ast.Constant) else "<dynamic>"
             out.add(f"env:{key}")
-        elif isinstance(sub, ast.Attribute) and _risky(dotted(sub)) and not isinstance(getattr(sub, "ctx", None), ast.Store):
-            out.add(f"ref:{dotted(sub)}")
+        elif isinstance(sub, ast.Attribute) and _risky(resolve(sub)) and not isinstance(getattr(sub, "ctx", None), ast.Store):
+            out.add(f"ref:{resolve(sub)}")
         elif isinstance(sub, ast.Name) and sub.id in ("eval", "exec", "compile", "__import__", "globals", "setattr", "delattr", "__builtins__"):
             out.add(f"ref:{sub.id}")
+        elif isinstance(sub, ast.Name) and sub.id in aliases and _risky(aliases[sub.id]):
+            out.add(f"ref:{aliases[sub.id]}")
         elif isinstance(sub, ast.Constant) and isinstance(sub.value, (str, bytes)):
             text = sub.value.decode("latin-1") if isinstance(sub.value, bytes) else sub.value
             out.update(f"host:{h.lower()}" for h in URL_RE.findall(text))

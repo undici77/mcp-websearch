@@ -153,7 +153,7 @@ commit would regenerate and go green. `scripts/safety_diff.py` closes that gap m
   `--sync --ack` appends the entries with blank reasons, and blank never passes. The commit diff of
   that file is the audit trail.
 - **A one-off full read**: `scripts/safety_diff.py --inventory` lists every risky feature in the
-  accepted port (35 today: 29 imports, 3 calls, 2 refs, 1 host). The sockets are only in DNS
+  accepted port (37 today: 31 imports, 3 calls, 2 refs, 1 host). The sockets are only in DNS
   pinning, and the only literal host is `api.github.com` (the README API).
 - **Plain `align.py`** counts unacked findings as owed, so `ALIGNED.` is impossible while one is pending.
 - **The proof** is `tests/test_safety_gate.py`. It plants a `subprocess` exfiltration of the SerpApi key
