@@ -72,14 +72,14 @@ unsloth_search/upstream_verbatim.py      ← GENERATED, DO NOT EDIT
 unsloth_search/fetch.py · search.py      ← the hand-written adapted functions
 ```
 
-A transcription error is no longer possible in 73 of the 79 ported symbols: they are emitted by a
+A transcription error is no longer possible in 74 of the 80 ported symbols: they are emitted by a
 script from upstream's AST, and the same upstream commit always produces the same sha256.
 
 ## The four surfaces
 
 | surface | count | test | when it shouts |
 |---|---|---|---|
-| `generated` | 73 | re-extract from upstream, compare each symbol's AST | upstream changed → `scripts/build_port.py` fixes it |
+| `generated` | 74 | re-extract from upstream, compare each symbol's AST | upstream changed → `scripts/build_port.py` fixes it |
 | `vendored` | 2 | sha256 both ways (`web_access_policy.py`, `_html_to_md.py`) | upstream changed → `cp` |
 | `adapted` | 6 | upstream fingerprint vs the one recorded at sync | upstream touched it → read and re-justify |
 | `out-of-scope` / `annotated` | 9 | presence + churn | upstream grew the feature, or deleted it |
@@ -153,8 +153,10 @@ commit would regenerate and go green. `scripts/safety_diff.py` closes that gap m
   `--sync --ack` appends the entries with blank reasons, and blank never passes. The commit diff of
   that file is the audit trail.
 - **A one-off full read**: `scripts/safety_diff.py --inventory` lists every risky feature in the
-  accepted port (37 today: 31 imports, 3 calls, 2 refs, 1 host). The sockets are only in DNS
-  pinning, and the only literal host is `api.github.com` (the README API).
+  accepted port (39 today: 32 imports, 3 calls, 2 refs, 2 hosts). The sockets are only in DNS
+  pinning, and the two literal hosts are `api.github.com` (the README API) and
+  `raw.githubusercontent.com` (blob links, #13754) — both derived from a URL the model named, never
+  from a host the code is told to go to.
 - **Plain `align.py`** counts unacked findings as owed, so `ALIGNED.` is impossible while one is pending.
 - **The proof** is `tests/test_safety_gate.py`. It plants a `subprocess` exfiltration of the SerpApi key
   in a throwaway "upstream" and requires the gate to stop it until a reason is written. It also
@@ -240,6 +242,7 @@ why. Reads better → port it.
 | `_has_single_byte_text_evidence` | cp1252 rescue; `_looks_binary` failing closed is the contract |
 | `_wikipedia_search` | second route to `en.wikipedia.org/w/api.php` outside ddgs, via `raw_bytes_max` |
 | `DEEP_RESEARCH_TOOL`, `RENDER_HTML_TOOL`, `SEARCH_CONVERSATION_TOOL`, `SEARCH_KNOWLEDGE_BASE_TOOL` | separate tools; this MCP mirrors `web_search` alone, each needs its own schema + egress review |
+| `mcp_search_*`, `_mcp_*`, `_MCP_*`, `_cached_mcp_catalog`, `_verb_forms` (#13601) | Studio's own tool-catalog index over its server list, behind `MCP_TOOL_SEARCH_NAME`. Not `web_search`: no tier, no fetch, no egress. Invisible to `NEW?` — 38 symbols arrived in one commit and none were flagged |
 
 `_DISABLE_DNS_PINNING_ENV` is upstream's name for the literal kept inline at `fetch.py:164`; same
 variable, same default, so the diff stays honest without a rename. It only matters when a proxy
@@ -254,6 +257,7 @@ applies, and `check_egress_mcp.py --wayback` sets it test-time only to keep the 
 | `_usable_search_results` | the tier gate above |
 | `_ContentDecoder`, `_DECODED_CODINGS`, `Accept-Encoding: gzip, deflate` | servers send gzip unasked, even against urllib's default `identity`; undecoded the body reaches the model as binary garbage. Same bytes, same host, no new schema field. Brotli/zstd stay refused (#13532) |
 | upstream's `or href` title fallback | absorb it; keep `clip.py` — with no spill, one uncapped hit fills the channel |
+| `_github_blob_raw_url` (#13754) | a blob page is GitHub's UI chrome around the file; the raw host returns the source the model asked for. Same model-named URL, same `fetch_url_raw` gates, no schema field. `approved_hosts()` excludes url mode by design, so no gate widens; the derived URL re-enters `check_url_access`, so a `github.com`-only allowlist blocks it and the fetch falls back to the blob page. Acked in `.align/safety-ack.json` |
 
 If upstream grows a new web/search symbol, `align.py` prints it under `NEW?`. Port it, or add it to
 `OUT_OF_SCOPE`/`ANNOTATED` with a reason. Silence is a decision, not an accident.
@@ -357,7 +361,7 @@ the installed server dies at `import` on a missing symbol.
 Prove the installed tree is the anchored tree, from `$DEST`:
 
 ```bash
-.venv/bin/python scripts/align.py --offline --upstream .align/upstream-stub   # 90 tracked · 90 synced
+.venv/bin/python scripts/align.py --offline --upstream .align/upstream-stub   # 91 tracked · 91 synced
 .venv/bin/python -c "import asyncio,server;print([t.name for t in asyncio.run(server.app.list_tools())])"
 ```
 

@@ -1,10 +1,10 @@
 {
   "upstream_branch": "main",
-  "upstream_commit": "cac08dcdb697659a16479f05b5298d167f0a5059",
+  "upstream_commit": "199987c63f10c80d78a9b50ea2e8a263825a35a0",
   "adapted": {
     "_web_search": "7d85c2247abfd9e1",
-    "_fetch_url_raw": "77e3db8365c23711",
-    "_fetch_page_text": "0141385a4ed40db7",
+    "_fetch_url_raw": "79f012b0dd7bd371",
+    "_fetch_page_text": "9dac03fe3e999ffe",
     "_truncate_page_text": "2aaf78e9ce640dcf",
     "_page_char_budget": "47bb74791242516f",
     "_result_char_budget": "0fc1d4c7557365d9"
@@ -17,9 +17,9 @@
       "upstream_sha256": "e703829966e8ad3e7f8cc64a41dc1b1bbaf1a8444d8a9c44f8756acd5bf86889"
     }
   },
-  "generated_symbols": 73,
+  "generated_symbols": 74,
   "stub_sha256": {
-    "tools.py": "adb80c8656ed5a52eefaea97107cad6d7805fb9c9cb133344efaf90cb15ae895",
+    "tools.py": "37dfbfb5eaa9c02da7da7b477ea6a6d9a5bee1de231426dd577d2b64cef8e5d8",
     "web_access_policy.py": "4241a557d63498923063bae2bd3cebe75d5d9510294210db915497d28e99eb83",
     "_html_to_md.py": "e703829966e8ad3e7f8cc64a41dc1b1bbaf1a8444d8a9c44f8756acd5bf86889"
   }

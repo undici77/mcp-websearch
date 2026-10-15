@@ -83,6 +83,7 @@ SYMBOLS = (
     "_normalize_url_scheme",
     "_pinned_netloc",
     "_github_repo_readme_api_url",
+    "_github_blob_raw_url",
     "_fetch_budget_exceeded",
     "_fetch_hop_timeout",
     "_validate_and_resolve_host",

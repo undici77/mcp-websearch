@@ -1,0 +1,16 @@
+{
+  "acks": [
+    {
+      "unit": "_github_blob_raw_url",
+      "finding": "host:raw.githubusercontent.com",
+      "ref": "52a3fbefe8d8b9bfde86d66c573bc56fe7eeec8c",
+      "reason": "host is a literal, not model-steerable: _github_blob_raw_url returns raw.githubusercontent.com or None (14 adversarial URLs — traversal, @, %XX, query/fragment, backslash, 169.254.169.254, localhost — never moved the host off the literal). The derived URL re-enters check_url_access plus the SSRF, pinning and deadline gates in fetch_url_raw, so a github.com-only allowlist blocks it and we fall back to the blob page. url mode already reaches this host today when the model names it, so no new egress capability is added."
+    },
+    {
+      "unit": "_github_blob_raw_url",
+      "finding": "import:urllib.parse.urlsplit",
+      "ref": "52a3fbefe8d8b9bfde86d66c573bc56fe7eeec8c",
+      "reason": "urlsplit parses the incoming URL only; the host never comes from the parse, it comes from the literal in the f-string."
+    }
+  ]
+}

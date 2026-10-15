@@ -530,6 +530,21 @@ def _github_repo_readme_api_url(url: str) -> str | None:
     return f"https://api.github.com/repos/{owner}/{repo}/readme"
 
 
+def _github_blob_raw_url(url: str) -> str | None:
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(url)
+    if (parsed.hostname or "").lower() not in ("github.com", "www.github.com"):
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 5 or parts[2] != "blob":
+        return None
+    owner, repo = parts[:2]
+    if not (_GITHUB_NAME_RE.match(owner) and _GITHUB_NAME_RE.match(repo)):
+        return None
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/" + "/".join(parts[3:])
+
+
 def _fetch_budget_exceeded(deadline, cancel_event):
     """User-facing error string when the fetch must stop early, else None."""
     if cancel_event is not None and cancel_event.is_set():

@@ -91,13 +91,18 @@ def test_an_ack_without_a_reason_is_no_ack():
 
 
 def test_current_anchor_is_clean():
-    """The anchored upstream adds nothing beyond the committed port: a quiet sync stays quiet."""
+    """The anchored upstream adds nothing beyond the committed port: a quiet sync stays quiet.
+
+    Findings are read the way safety_diff.check() reads them — acked ones are seen, so they do not
+    count. This must never drop back to comparing raw findings: HEAD only gains a newly ported symbol
+    at the commit that follows ALIGNED., so a raw comparison could never pass on a sync that ports one.
+    """
     gen, ven = safety_diff.accepted_surface()
     stub = os.path.join(ROOT, ".align", "upstream-stub")
     if not os.path.isfile(os.path.join(stub, build_port.UPSTREAM_REL)):
         pytest.skip("no stub")
     cgen, cven = safety_diff.candidate_surface(stub, "")
-    assert findings(safety_diff.units(gen, ven), safety_diff.units(cgen, cven)) == []
+    assert unacked(findings(safety_diff.units(gen, ven), safety_diff.units(cgen, cven)), safety_diff.load_acks()) == []
 
 
 def _git(cwd, *args):

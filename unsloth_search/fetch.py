@@ -49,6 +49,7 @@ from .upstream_verbatim import (  # noqa: F401  re-exported for callers and test
     _explicit_proxy_applies,
     _fetch_budget_exceeded,
     _fetch_hop_timeout,
+    _github_blob_raw_url,
     _github_repo_readme_api_url,
     _has_binary_magic,
     _HTMLBodyLocator,
@@ -305,9 +306,9 @@ def fetch_page_text(
 ) -> str:
     """ADAPTED from upstream `_fetch_page_text`: same routing, same conversion, same cap.
 
-    GitHub repo roots go to the README API so the model reads the README, not the repo page's UI
-    chrome. HTML becomes Markdown with the vendored stdlib converter; plain text is kept as-is so its
-    whitespace survives.
+    GitHub repo roots go to the README API and blob links to the raw host, so the model reads the
+    file's own text instead of the repo page's UI chrome. HTML becomes Markdown with the vendored
+    stdlib converter; plain text is kept as-is so its whitespace survives.
     """
     if max_chars is None:
         max_chars = page_char_budget()
@@ -351,6 +352,21 @@ def fetch_page_text(
                     f"README of {url} (fetched via the GitHub README API):\n\n" + readme_body,
                     max_chars,
                 )
+
+    # A blob page is GitHub's UI chrome around the file; the raw host returns the source the model asked
+    # for. Same URL the model named, same fetch gates, no schema field. Falls through to the HTML page if
+    # the raw host refuses, so a blocked route degrades to the old answer rather than losing the page.
+    raw_file_url = _github_blob_raw_url(url)
+    if raw_file_url:
+        err, body, _ctype = fetch_url_raw(
+            raw_file_url,
+            timeout = timeout,
+            deadline = deadline,
+            cancel_event = cancel_event,
+            **policy_kwargs,
+        )
+        if err is None and body.strip():
+            return _truncate_page_text(body.strip(), max_chars)
 
     err, body, content_type = fetch_url_raw(
         url,
